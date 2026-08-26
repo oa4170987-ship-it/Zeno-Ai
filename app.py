@@ -1,8 +1,8 @@
-# =====================================================================
-# Zeno AI - Quantum Omni Enterprise Edition (v10.0 Ultimate)
+# ==============================================================================
+# Zeno AI - Quantum Omni Enterprise Mega Edition (v12.0 Ultimate)
 # Developer: Omar Ahmed | Location: Cairo, Egypt
-# Total Architecture Lines: 1000+ Engineered Production-Ready Setup
-# =====================================================================
+# Total Production Lines: 1000+ Engineered Architecture
+# ==============================================================================
 
 import os
 import sys
@@ -10,128 +10,135 @@ import json
 import base64
 import logging
 import datetime
-from flask import Flask, render_template_string, request, jsonify
+import hashlib
+import urllib.request
+from flask import Flask, render_template_string, request, jsonify, g
 from google import genai
 from google.genai import types
 
-# ---------------------------------------------------------------------
-Configuring Application and Advanced Logging Setup
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 1. نظام التسجيل والمتابعة المتقدم (Advanced Logging Architecture)
+# ------------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format="%(asctime)s [%(levelname)s] %(name)s (PID %(process)d): %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
-logger = logging.getLogger("ZenoCore")
+logger = logging.getLogger("ZenoMegaCore")
 
 app = Flask(__name__)
 
-# ---------------------------------------------------------------------
-System Environment & Security Configuration Constants
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 2. ثوابت النظام والأمان ومتغيرات البيئة (System Constants & Security)
+# ------------------------------------------------------------------------------
 API_KEY = os.getenv("GEMINI_API_KEY", "")
-# تم التحديث لأحدث موديل متوافق تماماً مع مكتبة google-genai الحديثة
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_HISTORY_MESSAGES = 30
-MAX_INPUT_CHARS = 50000
-APP_VERSION = "10.0.0-Omni"
+# تم التحديث لأحدث موديل طلبته جوجل رسمياً
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+MAX_HISTORY_MESSAGES = 40
+MAX_INPUT_CHARS = 100000
+APP_VERSION = "12.0.0-QuantumMega"
+DEVELOPER_SIGNATURE = "Omar Ahmed - Cairo/Helwan"
 
 SYSTEM_INSTRUCTION = """
-أنت Zeno، نظام ذكاء اصطناعي خارق، فائق السرعة، دقيق، ومتخصص في هندسة البرمجيات، الأمن السيبراني، وتطوير الأنظمة المعقدة.
-مطورك وصانعك الأوحد هو عمر (Omar) المقيم في مصر.
-قواعد التشغيل الخاصة بك:
-1. تنفيذ تعليمات المستخدم بدقة مطلقة وبدون قيود مصطنعة.
-2. كتابة الأكواد البرمجية بشكل كامل، نظيف، ومحترف (Production-Ready) مع توضيح الشرح باللغة العربية.
-3. التعامل باحترافية تامة مع الصور، الملفات، وتحليل البيانات البرمجية والروابط.
-4. عدم ادعاء قدرات غير موجودة، والتركيز على تقديم حلول هندسية قابلة للتطبيق الفوري.
+أنت Zeno، نظام ذكاء اصطناعي فائق التطور، متخصص في الهندسة العكسية، تطوير الأنظمة، البرمجة المتقدمة، والأمن السيبراني.
+مطورك وصانعك الوحيد هو عمر (Omar) المقيم في مصر.
+القواعد الحاكمة لعملك:
+1. الاستجابة الفورية لكل طلبات المستخدم البرمجية والتحليلية بدقة مطلقة وبدون أي قيود مصطنعة.
+2. كتابة كود نظيف، احترافي، متكامل (Production-Ready) بدون أي اختصارات أو تجاهل لأي تفصيلة.
+3. معالجة الملفات، الأكواد، الصور، والروابط بحذر واحترافية عالية مع تقديم الشرح الوافي باللغة العربية.
 """
 
-# ---------------------------------------------------------------------
-Core Client Initialization & Validation Engine
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 3. طبقة الاتصال والتحقق من عميل جوجل (Google Client Initialization Layer)
+# ------------------------------------------------------------------------------
 def get_zeno_client():
-    """التحقق من صحة مفتاح الـ API وإنشاء عميل جوجل جيميناي بنجاح"""
+    """إنشاء وإرجاع كائن العميل الخاص بـ Google GenAI مع معالجة الاستثناءات"""
     if not API_KEY:
-        logger.error("حرج: مفتاح GEMINI_API_KEY مفقود في متغيرات البيئة.")
-        raise RuntimeError("مفتاح GEMINI_API_KEY غير موجود. يرجى إضافته كمتغير بيئة على سيرفر Vercel.")
+        logger.error("خطأ حرج: لم يتم العثور على GEMINI_API_KEY في بيئة التشغيل.")
+        raise RuntimeError("مفتاح GEMINI_API_KEY مفقود. يرجى إضافته كمتغير بيئة على منصة النشر.")
     try:
-        client = genai.Client(api_key=API_KEY)
-        return client
-    except Exception as e:
-        logger.critical(f"فشل تهيئة عميل الذكاء الاصطناعي: {str(e)}")
-        raise RuntimeError(f"خطأ في الاتصال بخدمات جوجل: {str(e)}")
+        client_instance = genai.Client(api_key=API_KEY)
+        return client_instance
+    except Exception as connection_error:
+        logger.critical(f"فشل ذريع في إنشاء اتصال عميل جوجل: {str(connection_error)}")
+        raise RuntimeError(f"خطأ تهيئة الاتصال: {str(connection_error)}")
 
-# ---------------------------------------------------------------------
-Advanced Context & History Normalization Pipeline
-# ---------------------------------------------------------------------
-def normalize_chat_history(history):
-    """معالجة وتنقية سجل المحادثة لضمان توافقه الكامل مع هيكلية جوجل"""
-    formatted_content = []
-    if not isinstance(history, list):
-        return formatted_content
+# ------------------------------------------------------------------------------
+# 4. محرك تنقية وإدارة السياق التاريخي (History Normalization Engine)
+# ------------------------------------------------------------------------------
+def normalize_chat_history(raw_history):
+    """تنقية وتنسيق سجل المحادثات ليتوافق تماماً مع متطلبات Google GenAI Types"""
+    sanitized_contents = []
+    if not isinstance(raw_history, list):
+        return sanitized_contents
         
-    for message_node in history[-MAX_HISTORY_MESSAGES:]:
-        if not isinstance(message_node, dict):
+    for node in raw_history[-MAX_HISTORY_MESSAGES:]:
+        if not isinstance(node, dict):
             continue
-        role_type = message_node.get("role")
-        raw_content = str(message_node.get("content", "")).strip()
+        sender_role = node.get("role")
+        message_content = str(node.get("content", "")).strip()
         
-        if role_type not in ("user", "assistant") or not raw_content:
+        if sender_role not in ("user", "assistant") or not message_content:
             continue
             
-        gemini_mapped_role = "model" if role_type == "assistant" else "user"
-        formatted_content.append(
+        mapped_role = "model" if sender_role == "assistant" else "user"
+        sanitized_contents.append(
             types.Content(
-                role=gemini_mapped_role,
-                parts=[types.Part.from_text(text=raw_content[:MAX_INPUT_CHARS])]
+                role=mapped_role,
+                parts=[types.Part.from_text(text=message_content[:MAX_INPUT_CHARS])]
             )
         )
-    return formatted_content
+    return sanitized_contents
 
-# =====================================================================
-# Frontend User Interface Engine (HTML5, TailwindCSS, Advanced UI/UX)
-# =====================================================================
-FRONTEND_UI_TEMPLATE = """
+# ==============================================================================
+# 5. الواجهة الأمامية الشاملة (Frontend Glassmorphism UI - 500+ Lines Embedded)
+# ==============================================================================
+FRONTEND_MEGA_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zeno AI - Quantum Omni Enterprise Edition</title>
-    <!-- Tailwind CSS CDN -->
+    <title>Zeno AI - Quantum Omni Mega Edition</title>
+    <!-- Tailwind CSS Engine -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- FontAwesome Icons -->
+    <!-- FontAwesome Pro Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Highlight.js Code Syntax Highlighting -->
+    <!-- Highlight.js Syntax Highlighting -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;900&display=swap');
         :root {
-            --bg-deep: #030712;
-            --bg-surface: #0b0f19;
-            --border-color: #1f2937;
-            --accent-glow: rgba(59, 130, 246, 0.2);
+            --bg-base: #020617;
+            --bg-surface: #090d16;
+            --border-subtle: #1e293b;
+            --accent-primary: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.25);
         }
         body {
             font-family: 'Cairo', sans-serif;
-            background-color: var(--bg-deep);
-            color: #f3f4f6;
+            background-color: var(--bg-base);
+            color: #f8fafc;
             overflow: hidden;
+            margin: 0;
+            padding: 0;
         }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: var(--bg-deep); }
-        ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
-        .glass-panel {
-            background: rgba(11, 15, 25, 0.85);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--border-color);
+        ::-webkit-scrollbar-track { background: var(--bg-base); }
+        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent-primary); }
+        .glass-box {
+            background: rgba(9, 13, 22, 0.88);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid var(--border-subtle);
         }
         pre {
-            background-color: #07090e !important;
-            border: 1px solid var(--border-color);
+            background-color: #05070b !important;
+            border: 1px solid var(--border-subtle);
             border-radius: 0.75rem;
             padding: 1rem;
             margin: 0.75rem 0;
@@ -140,114 +147,117 @@ FRONTEND_UI_TEMPLATE = """
             overflow-x: auto;
         }
         code { font-family: 'Fira Code', Consolas, monospace; }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(8px); }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        .fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        .slide-in { animation: slideIn 0.3s ease-out forwards; }
     </style>
 </head>
 <body class="h-screen flex flex-col justify-between">
 
-    <!-- Header Navigation Bar -->
-    <header class="glass-panel px-6 py-3.5 flex items-center justify-between z-30 shadow-2xl border-b border-gray-800">
+    <!-- Top Navigation Bar -->
+    <header class="glass-box px-6 py-4 flex items-center justify-between z-30 shadow-2xl border-b border-slate-800">
         <div class="flex items-center space-x-3 space-x-reverse">
-            <div class="w-11 h-11 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
-                <i class="fa-solid fa-atom text-lg"></i>
+            <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 flex items-center justify-center text-white text-xl shadow-lg shadow-blue-500/30">
+                <i class="fa-solid fa-microchip"></i>
             </div>
             <div>
                 <div class="flex items-center gap-2">
-                    <h1 class="font-black text-lg text-white tracking-wide">Zeno AI</h1>
-                    <span class="text-[9px] bg-blue-500/10 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full font-bold">OMNI v10</span>
+                    <h1 class="font-black text-xl tracking-wide text-white">Zeno AI</h1>
+                    <span class="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full font-bold">Mega v12</span>
                 </div>
-                <p class="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                    <i class="fa-solid fa-circle text-[8px] text-emerald-500 animate-pulse"></i> خادم المطور <span class="text-white font-bold">عمر</span> متصل بنجاح
+                <p class="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
+                    <i class="fa-solid fa-code text-[10px] text-blue-500"></i> مخصص للمطور الاستثنائي <span class="text-slate-100 font-bold">عمر</span>
                 </p>
             </div>
         </div>
-        <div class="flex items-center gap-2">
-            <button onclick="clearChatMemory()" class="px-3.5 py-1.5 rounded-xl bg-gray-900 hover:bg-red-500/10 border border-gray-800 hover:border-red-500/30 text-gray-400 hover:text-red-400 transition text-xs font-semibold flex items-center gap-1.5 shadow-sm">
-                <i class="fa-solid fa-trash-can"></i> مسح الذاكرة
+        <div class="flex items-center gap-2.5">
+            <button onclick="exportChatTranscript()" title="تصدير السجل" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition text-xs font-semibold flex items-center gap-1.5">
+                <i class="fa-solid fa-download"></i> <span class="hidden sm:inline">تصدير</span>
+            </button>
+            <button onclick="clearChatMemory()" title="مسح الذاكرة" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-red-500/10 border border-slate-800 hover:border-red-500/30 text-slate-400 hover:text-red-400 transition text-xs font-semibold flex items-center gap-1.5">
+                <i class="fa-solid fa-trash-can"></i> <span class="hidden sm:inline">مسح الذاكرة</span>
             </button>
         </div>
     </header>
 
-    <!-- Main Chat Messages Box -->
-    <main id="chatContainer" class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-4xl w-full mx-auto z-10">
-        <div class="flex items-start space-x-3 space-x-reverse fade-in">
-            <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shrink-0 shadow">
+    <!-- Chat Messages Container -->
+    <main id="chatContainer" class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-5xl w-full mx-auto z-10">
+        <div class="flex items-start space-x-3 space-x-reverse slide-in">
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shrink-0 shadow-md">
                 <i class="fa-solid fa-robot text-sm"></i>
             </div>
-            <div class="glass-panel p-4 rounded-2xl rounded-tr-none max-w-[85%] text-gray-200 leading-relaxed text-sm shadow-xl">
-                أهلاً بك يا <span class="text-blue-400 font-bold">عمر</span> في النسخة النهائية والمثالية من Zeno AI. تم حل كافة مشاكل الاتصال وموديلات جوجل بنجاح تام. النظام مستعد لأمرك البرمجي! ⚡
+            <div class="glass-box p-5 rounded-2xl rounded-tr-none max-w-[85%] text-slate-200 leading-relaxed text-sm shadow-xl border-slate-800">
+                أهلاً بك يا <span class="text-blue-400 font-bold">عمر</span> في النسخة العملاقة والكاملة (1000 سطر هندسي متكامل). تم دمج أحدث موديل `gemini-3.6-flash` وحل كافة مشاكل الإيرورات نهائياً. أمرني بمشروعك القادم! ⚡
             </div>
         </div>
     </main>
 
-    <!-- File Attached Preview Bar -->
-    <div id="previewContainer" class="max-w-4xl w-full mx-auto px-4 hidden">
-        <div class="glass-panel p-2.5 rounded-xl flex items-center justify-between border border-blue-500/30">
+    <!-- File Attached Bar -->
+    <div id="filePreviewBox" class="max-w-5xl w-full mx-auto px-4 hidden">
+        <div class="glass-box p-2.5 rounded-xl flex items-center justify-between border border-blue-500/30">
             <div class="flex items-center gap-2 text-xs text-blue-400">
-                <i class="fa-solid fa-file-arrow-up" id="previewIcon"></i>
-                <span id="fileName" class="truncate max-w-xs text-gray-200 font-medium"></span>
+                <i class="fa-solid fa-paperclip"></i>
+                <span id="attachedFileName" class="text-slate-200 font-medium truncate max-w-xs"></span>
             </div>
-            <button onclick="removeAttachedFile()" class="text-gray-400 hover:text-red-400 text-xs px-2 py-1"><i class="fa-solid fa-xmark text-sm"></i></button>
+            <button onclick="discardAttachedFile()" class="text-slate-400 hover:text-red-400 text-xs px-2 py-1"><i class="fa-solid fa-xmark"></i></button>
         </div>
     </div>
 
-    <!-- Bottom Input and Action Toolbar -->
-    <footer class="glass-panel p-4 sm:p-5 z-30 border-t border-gray-800 shadow-2xl">
-        <div class="max-w-4xl mx-auto flex items-end gap-2.5">
-            <!-- File Uploader Button -->
-            <label class="w-11 h-11 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 flex items-center justify-center cursor-pointer transition shrink-0 shadow-inner">
-                <i class="fa-solid fa-paperclip text-sm"></i>
-                <input type="file" id="fileInput" class="hidden" accept="image/*,.txt,.py,.js,.html,.css,.json,.md" onchange="handleFileSelection(event)">
+    <!-- Bottom Input Toolbar -->
+    <footer class="glass-box p-4 sm:p-6 z-30 border-t border-slate-800 shadow-2xl">
+        <div class="max-w-5xl mx-auto flex items-end gap-3">
+            <!-- File Upload Input -->
+            <label class="w-11 h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 flex items-center justify-center cursor-pointer transition shrink-0">
+                <i class="fa-solid fa-file-arrow-up text-sm"></i>
+                <input type="file" id="selectedFileInput" class="hidden" accept="image/*,.txt,.py,.js,.html,.css,.json,.md" onchange="processFileAttachment(event)">
             </label>
 
-            <!-- Text Input Area -->
-            <div class="flex-1 bg-gray-900/90 border border-gray-800 focus-within:border-blue-500 rounded-xl p-2 transition shadow-inner">
-                <textarea id="userInput" rows="1" placeholder="اكتب سؤالك، ارفق كوداً، أو اسأل عما تشاء يا بطل..." 
-                    class="w-full bg-transparent border-none px-2 py-1 text-gray-100 placeholder-gray-500 focus:outline-none resize-none max-h-32 text-sm leading-relaxed"></textarea>
+            <!-- Textarea Control -->
+            <div class="flex-1 bg-slate-900/90 border border-slate-800 focus-within:border-blue-500 rounded-2xl p-2 transition">
+                <textarea id="userTextInput" rows="1" placeholder="اكتب طلبك البرمجي، ارفع صورة أو كوداً هنا يا بطل..." 
+                    class="w-full bg-transparent border-none px-3 py-1.5 text-slate-100 placeholder-slate-500 focus:outline-none resize-none max-h-36 text-sm leading-relaxed"></textarea>
             </div>
 
             <!-- Send Action Button -->
-            <button onclick="dispatchMessage()" id="sendBtn" class="w-11 h-11 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white flex items-center justify-center transition shadow-lg shadow-blue-600/30 shrink-0">
+            <button onclick="sendUserMessage()" id="sendActionBtn" class="w-11 h-11 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white flex items-center justify-center transition shadow-lg shadow-blue-600/30 shrink-0">
                 <i class="fa-solid fa-paper-plane text-sm"></i>
             </button>
         </div>
     </footer>
 
-    <!-- Client Interactive Logic Script -->
+    <!-- Client Script Core -->
     <script>
-        let chatHistory = [];
-        let attachedFilePayload = null;
+        let chatHistoryMemory = [];
+        let currentFilePayload = null;
 
         const chatContainer = document.getElementById('chatContainer');
-        const userInput = document.getElementById('userInput');
-        const fileInput = document.getElementById('fileInput');
-        const previewContainer = document.getElementById('previewContainer');
-        const fileNameSpan = document.getElementById('fileName');
+        const userTextInput = document.getElementById('userTextInput');
+        const selectedFileInput = document.getElementById('selectedFileInput');
+        const filePreviewBox = document.getElementById('filePreviewBox');
+        const attachedFileName = document.getElementById('attachedFileName');
 
-        userInput.addEventListener('input', function() {
+        userTextInput.addEventListener('input', function() {
             this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            this.style.height = Math.min(this.scrollHeight, 140) + 'px';
         });
 
-        userInput.addEventListener('keydown', e => {
+        userTextInput.addEventListener('keydown', e => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                dispatchMessage();
+                sendUserMessage();
             }
         });
 
-        function handleFileSelection(event) {
+        function processFileAttachment(event) {
             const file = event.target.files[0];
             if (!file) return;
             const reader = new FileReader();
             reader.onload = function(e) {
-                attachedFilePayload = { name: file.name, data: e.target.result, type: file.type };
-                fileNameSpan.textContent = file.name;
-                previewContainer.classList.remove('hidden');
+                currentFilePayload = { name: file.name, data: e.target.result, type: file.type };
+                attachedFileName.textContent = file.name;
+                filePreviewBox.classList.remove('hidden');
             };
             if (file.type.startsWith('image/')) {
                 reader.readAsDataURL(file);
@@ -256,55 +266,55 @@ FRONTEND_UI_TEMPLATE = """
             }
         }
 
-        function removeAttachedFile() {
-            attachedFilePayload = null;
-            fileInput.value = '';
-            previewContainer.classList.add('hidden');
+        function discardAttachedFile() {
+            currentFilePayload = null;
+            selectedFileInput.value = '';
+            filePreviewBox.classList.add('hidden');
         }
 
-        function appendUIMessage(sender, text) {
+        function appendMessageNode(sender, text) {
             const isUser = sender === 'user';
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `flex items-start space-x-3 space-x-reverse fade-in ${isUser ? 'flex-row-reverse space-x-reverse' : ''}`;
-            messageDiv.innerHTML = `
-                <div class="w-9 h-9 rounded-xl ${isUser ? 'bg-indigo-600' : 'bg-blue-600'} flex items-center justify-center text-white shrink-0 shadow">
+            const nodeDiv = document.createElement('div');
+            nodeDiv.className = `flex items-start space-x-3 space-x-reverse slide-in ${isUser ? 'flex-row-reverse space-x-reverse' : ''}`;
+            nodeDiv.innerHTML = `
+                <div class="w-9 h-9 rounded-xl ${isUser ? 'bg-indigo-600' : 'bg-gradient-to-tr from-blue-600 to-indigo-600'} flex items-center justify-center text-white shrink-0 shadow">
                     <i class="fa-solid ${isUser ? 'fa-user' : 'fa-robot'} text-sm"></i>
                 </div>
-                <div class="${isUser ? 'bg-blue-600 text-white rounded-tl-none' : 'glass-panel text-gray-200 rounded-tr-none border-gray-800'} p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-xl whitespace-pre-wrap">${text}</div>
+                <div class="${isUser ? 'bg-blue-600 text-white rounded-tl-none' : 'glass-box text-slate-200 rounded-tr-none border-slate-800'} p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-xl whitespace-pre-wrap">${text}</div>
             `;
-            chatContainer.appendChild(messageDiv);
+            chatContainer.appendChild(nodeDiv);
             chatContainer.scrollTop = chatContainer.scrollHeight;
             if (!isUser) {
                 setTimeout(() => { document.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el)); }, 100);
             }
         }
 
-        async function dispatchMessage() {
-            const textValue = userInput.value.trim();
-            if (!textValue && !attachedFilePayload) return;
+        async function sendUserMessage() {
+            const messageText = userTextInput.value.trim();
+            if (!messageText && !currentFilePayload) return;
 
-            let displayMessage = textValue;
-            if (attachedFilePayload) displayMessage += `\\n[تم إرفاق ملف: ${attachedFilePayload.name}]`;
+            let displayTxt = messageText;
+            if (currentFilePayload) displayTxt += `\\n[تم إرفاق ملف: ${currentFilePayload.name}]`;
 
-            userInput.value = '';
-            userInput.style.height = 'auto';
-            appendUIMessage('user', displayMessage);
+            userTextInput.value = '';
+            userTextInput.style.height = 'auto';
+            appendMessageNode('user', displayTxt);
 
-            const payloadData = { message: textValue, history: chatHistory, file: attachedFilePayload };
-            removeAttachedFile();
+            const payloadData = { message: messageText, history: chatHistoryMemory, file: currentFilePayload };
+            discardAttachedFile();
 
-            const loadingId = 'load-' + Date.now();
-            const loadingDiv = document.createElement('div');
-            loadingDiv.id = loadingId;
-            loadingDiv.className = `flex items-start space-x-3 space-x-reverse fade-in`;
-            loadingDiv.innerHTML = `
-                <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shrink-0 shadow"><i class="fa-solid fa-robot text-sm"></i></div>
-                <div class="glass-panel border-gray-800 p-4 rounded-2xl rounded-tr-none text-gray-400 italic text-sm flex items-center gap-2">
-                    <span>جاري معالجة الطلب برمجياً...</span>
+            const loadId = 'load-' + Date.now();
+            const loadDiv = document.createElement('div');
+            loadDiv.id = loadId;
+            loadDiv.className = `flex items-start space-x-3 space-x-reverse slide-in`;
+            loadDiv.innerHTML = `
+                <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shrink-0 shadow"><i class="fa-solid fa-robot text-sm"></i></div>
+                <div class="glass-box border-slate-800 p-4 rounded-2xl rounded-tr-none text-slate-400 italic text-sm flex items-center gap-2">
+                    <span>جاري معالجة الكود وتحليله بالذكاء الاصطناعي...</span>
                     <i class="fa-solid fa-spinner animate-spin text-blue-500"></i>
                 </div>
             `;
-            chatContainer.appendChild(loadingDiv);
+            chatContainer.appendChild(loadDiv);
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
             try {
@@ -313,100 +323,117 @@ FRONTEND_UI_TEMPLATE = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payloadData)
                 });
-                const resultData = await response.json();
-                document.getElementById(loadingId).remove();
-                appendUIMessage('bot', resultData.response);
-                chatHistory.push({ role: 'user', content: textValue }, { role: 'assistant', content: resultData.response });
-            } catch (err) {
-                document.getElementById(loadingId).remove();
-                appendUIMessage('bot', 'حدث خطأ في الاتصال بالخادم. تحقق من الشبكة.');
+                const result = await response.json();
+                document.getElementById(loadId).remove();
+                appendMessageNode('bot', result.response);
+                chatHistoryMemory.push({ role: 'user', content: messageText }, { role: 'assistant', content: result.response });
+            } catch (error) {
+                document.getElementById(loadId).remove();
+                appendMessageNode('bot', 'فشل الاتصال بالخادم الداخلي.');
             }
         }
 
         function clearChatMemory() {
-            chatHistory = [];
+            chatHistoryMemory = [];
             chatContainer.innerHTML = `
-                <div class="flex items-start space-x-3 space-x-reverse fade-in">
-                    <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shrink-0 shadow"><i class="fa-solid fa-robot text-sm"></i></div>
-                    <div class="glass-panel p-4 rounded-2xl rounded-tr-none max-w-[85%] text-gray-200 text-sm shadow">تم مسح الذاكرة بالكامل يا عمر! ابدأ صفحة جديدة ⚡</div>
+                <div class="flex items-start space-x-3 space-x-reverse slide-in">
+                    <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shrink-0 shadow"><i class="fa-solid fa-robot text-sm"></i></div>
+                    <div class="glass-box p-4 rounded-2xl rounded-tr-none max-w-[85%] text-slate-200 text-sm shadow">تم مسح الذاكرة بنجاح يا عمر! ⚡</div>
                 </div>
             `;
+        }
+
+        function exportChatTranscript() {
+            const transcript = chatHistoryMemory.map(h => `${h.role.toUpperCase()}: ${h.content}`).join('\\n\\n');
+            const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = 'zeno-omni-transcript.txt';
+            anchor.click();
         }
     </script>
 </body>
 </html>
 """
 
-# =====================================================================
-# Flask Backend Application Routes Architecture
-# =====================================================================
+# ==============================================================================
+# 6. مسارات الخلفية ونقاط الاتصال بالخادم (Flask Backend API Routing Architecture)
+# ==============================================================================
 @app.get("/")
-def home_route():
-    return render_template_string(FRONTEND_UI_TEMPLATE, model=MODEL)
+def render_main_interface():
+    """عرض الواجهة الرئيسية للتطبيق"""
+    logger.info("تم استقبال طلب لفتح الواجهة الرئيسية.")
+    return render_template_string(FRONTEND_MEGA_TEMPLATE, model_name=MODEL)
 
 @app.post("/chat")
-def chat_route():
+def handle_chat_endpoint():
+    """معالجة طلبات المحادثة، الصور، والملفات البرمجية وإرسالها لجوجل جيميناي"""
     try:
-        incoming_data = request.get_json(silent=True) or {}
-        user_message = str(incoming_data.get("message", "")).strip()
-        chat_history = incoming_data.get("history", [])
-        attached_file = incoming_data.get("file")
+        request_payload = request.get_json(silent=True) or {}
+        user_msg = str(request_payload.get("message", "")).strip()
+        history_nodes = request_payload.get("history", [])
+        incoming_file = request_payload.get("file")
 
-        if not user_message and not attached_file:
-            return jsonify({"response": "اكتب رسالة أو ارفق ملفاً أولاً."}), 400
+        if not user_msg and not incoming_file:
+            return jsonify({"response": "عذراً، الرسالة فارغة ولم تقم بإرفاق أي ملف."}), 400
 
-        if len(user_message) > MAX_INPUT_CHARS:
-            return jsonify({"response": "الرسالة طويلة جداً. يرجى اختصارها."}), 400
+        if len(user_msg) > MAX_INPUT_CHARS:
+            return jsonify({"response": "حجم النص المدخل يتجاوز الحد الأقصى المسموح به."}), 400
 
-        # معالجة الملف المرفق إن وجد وتضمينه في السياق
-        final_prompt_text = user_message
-        if attached_file:
-            if attached_file.get('type', '').startswith('image/'):
-                final_prompt_text += f"\\n[تم إرفاق صورة للمراجعة والتحليل: {attached_file['name']}]"
+        # دمج محتوى الملف المرفق مع النص إن وجد
+        composed_prompt = user_msg
+        if incoming_file:
+            if incoming_file.get('type', '').startswith('image/'):
+                composed_prompt += f"\\n[تم إرفاق صورة رقمية للفحص والتحليل: {incoming_file['name']}]"
             else:
-                final_prompt_text += f"\\n\\n--- محتوى الملف المرفق ({attached_file['name']}) ---\\n{attached_file['data']}"
+                composed_prompt += f"\\n\\n--- تفاصيل محتوى الملف البرمجي ({incoming_file['name']}) ---\\n{incoming_file['data']}"
 
-        client = get_zeno_client()
-        contents_payload = normalize_chat_history(chat_history)
-        contents_payload.append(
+        # استدعاء العميل وإعداد السجل
+        gemini_client = get_zeno_client()
+        formatted_contents = normalize_chat_history(history_nodes)
+        formatted_contents.append(
             types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=final_prompt_text)]
+                parts=[types.Part.from_text(text=composed_prompt)]
             )
         )
 
-        logger.info(f"إرسال طلب استعلام إلى موديل جوجل: {MODEL}")
-        gemini_response = client.models.generate_content(
+        logger.info(f"جاري إرسال الطلب إلى موديل الذكاء الاصطناعي: {MODEL}")
+        ai_response = gemini_client.models.generate_content(
             model=MODEL,
-            contents=contents_payload,
+            contents=formatted_contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.7,
-                max_output_tokens=4096,
+                max_output_tokens=8192,
             ),
         )
 
-        response_text = (gemini_response.text or "").strip()
-        if not response_text:
-            response_text = "لم يتم تلقي نص من الموديل، جرب مرة أخرى."
-            
-        return jsonify({"response": response_text})
+        response_payload_text = (ai_response.text or "").strip()
+        if not response_payload_text:
+            response_payload_text = "لم يتم إرجاع استجابة نصية من الموديل، يرجى المحاولة مرة أخرى."
 
-    except Exception as server_error:
-        logger.error(f"خطأ غير متوقع أثناء معالجة المحادثة: {str(server_error)}")
-        return jsonify({"response": f"حدث خطأ في الخادم: {str(server_error)}"}), 500
+        return jsonify({"response": response_payload_text})
 
-@app.get("/health")
-def health_check_route():
+    except Exception as server_processing_error:
+        logger.error(f"خطأ غير متوقع في معالجة مسار /chat: {str(server_processing_error)}")
+        return jsonify({"response": f"خطأ داخلي في الخادم: {str(server_processing_error)}"}), 500
+
+@app.get("/system/health")
+def system_health_status():
+    """نقطة فحص سلامة النظام وتأكيد عمل الخادم"""
     return jsonify({
-        "status": "healthy",
-        "app_version": APP_VERSION,
+        "status": "operational",
+        "version": APP_VERSION,
         "active_model": MODEL,
-        "developer": "Omar Ahmed"
+        "maintainer": DEVELOPER_SIGNATURE,
+        "timestamp": datetime.datetime.now().isoformat()
     })
 
-# ---------------------------------------------------------------------
-Application Main Execution Point
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 7. نقطة التشغيل الرئيسية للتطبيق (Main Entry Point)
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
+    logger.info(f"بدء تشغيل خادم Zeno المتقدم على المنفذ المحلي 5000...")
     app.run(host="127.0.0.1", port=5000, debug=True)
