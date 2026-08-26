@@ -4,16 +4,17 @@ from google import genai
 from google.genai import types
 
 app = Flask(__name__)
-app.secret_key = "omar_zeno_super_secret_key_2026"
+app.secret_key = os.getenv("SECRET_KEY", "omar_zeno_super_secret_key_2026")
 
-# حط مفتاح الـ API بتاعك هنا مباشرة عشان يشتغل معاك محلياً من غير وجع دماغ
-API_KEY = "حط_مفتاحك_هنا_يا_عمر"
 MODEL = "gemini-3.6-flash"
 
 SYSTEM_INSTRUCTION = """أنت Zeno، نظام ذكاء اصطناعي خارق، سريع للغاية، ودقيق. تم تطويرك وبرمجتك بواسطة المطور العبقري عمر (Omar). ساعده بكل قوة واحترافية."""
 
 def get_client():
-    return genai.Client(api_key=API_KEY)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
+    return genai.Client(api_key=api_key)
 
 UI_TEMPLATE = """
 <!DOCTYPE html>
@@ -59,7 +60,7 @@ UI_TEMPLATE = """
 
     <main id="chatBox" class="flex-1 overflow-y-auto p-4 space-y-4 max-w-4xl w-full mx-auto">
         <div class="bg-gray-900/90 border border-gray-800 p-4 rounded-2xl text-sm shadow-md max-w-xl">
-            أهلاً بك يا عمر في النظام الخارق! الذاكرة مفعلة والموديل جاهز. كيف أساعدك اليوم؟ ⚡
+            أهلاً بك يا عمر في النظام الخارق السحابي! الذاكرة مفعلة والموديل يعمل بكفاءة تامة. كيف أساعدك اليوم؟ ⚡
         </div>
     </main>
 
@@ -98,7 +99,7 @@ UI_TEMPLATE = """
                 history.push({role: 'user', content: text}, {role: 'assistant', content: data.response});
                 if(history.length > 20) history = history.slice(-20);
             } catch (err) {
-                chatBox.innerHTML += `<div class="bg-red-900/50 border border-red-700 p-3.5 rounded-2xl text-sm">حدث خطأ في الاتصال.</div>`;
+                chatBox.innerHTML += `<div class="bg-red-900/50 border border-red-700 p-3.5 rounded-2xl text-sm">حدث خطأ في الاتصال بالشبكة.</div>`;
             }
         }
     </script>
@@ -146,7 +147,4 @@ def chat():
         )
         return jsonify({"response": resp.text.strip()})
     except Exception as e:
-        return jsonify({"response": f"خطأ: {str(e)}"}), 500
-
-if __name__ == "__main__":
-    app.run(port=5000)
+        return jsonify({"response": f"خطأ سحابي: {str(e)}"}), 500
