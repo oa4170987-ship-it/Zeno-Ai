@@ -3,67 +3,154 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zeno AI Chat</title>
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <title>Zeno AI - Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        body { background-color: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; }
-        .chat-container { width: 100%; max-width: 600px; height: 80vh; background: #1e293b; border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
-        .chat-header { background: #0f172a; padding: 16px; text-align: center; font-size: 1.2rem; font-weight: bold; color: #38bdf8; border-bottom: 1px solid #334155; }
-        .chat-box { flex: 1; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
-        .message { max-width: 80%; padding: 12px 16px; border-radius: 12px; line-height: 1.4; font-size: 0.95rem; }
-        .user-message { background: #0284c7; color: white; align-self: flex-start; border-bottom-left-radius: 2px; }
-        .bot-message { background: #334155; color: #f8fafc; align-self: flex-end; border-bottom-right-radius: 2px; }
-        .input-area { display: flex; padding: 12px; background: #0f172a; gap: 8px; border-top: 1px solid #334155; }
-        input { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; }
-        input:focus { border-color: #38bdf8; }
-        button { background: #0284c7; color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; }
-        button:hover { background: #0369a1; }
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&display=swap');
+        body { font-family: 'Cairo', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        .chat-container::-webkit-scrollbar { width: 6px; }
+        .chat-container::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
     </style>
 </head>
-<body>
+<body class="h-screen flex flex-col justify-between overflow-hidden">
 
-<div class="chat-container">
-    <div class="chat-header">🤖 Zeno AI Assistant</div>
-    <div class="chat-box" id="chatBox">
-        <div class="message bot-message">أهلاً بك! أنا Zeno، كيف يمكنني مساعدتك اليوم؟</div>
+    <header class="bg-slate-900/80 backdrop-blur border-b border-slate-800 p-4 flex items-center justify-between shadow-lg">
+        <div class="flex items-center space-x-3 space-x-reverse">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-md shadow-blue-500/20">
+                <i class="fa-solid fa-robot text-white text-lg"></i>
+            </div>
+            <div>
+                <h1 class="font-bold text-lg tracking-wide text-white">Zeno AI</h1>
+                <p class="text-xs text-emerald-400 flex items-center gap-1">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> متصل الآن (بواسطة عمر)
+                </p>
+            </div>
+        </div>
+        <button onclick="clearChat()" class="text-slate-400 hover:text-red-400 transition text-sm px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/50">
+            <i class="fa-solid fa-trash-can ml-1"></i> مسح المحادثة
+        </button>
+    </header>
+
+    <div id="chatContainer" class="chat-container flex-1 overflow-y-auto p-4 md:p-6 space-y-6 max-w-4xl w-full mx-auto">
+        <div class="flex items-start space-x-3 space-x-reverse">
+            <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0 shadow">
+                <i class="fa-solid fa-robot text-sm"></i>
+            </div>
+            <div class="bg-slate-800/80 border border-slate-700/60 p-4 rounded-2xl rounded-tr-none max-w-[85%] text-slate-200 leading-relaxed shadow-sm">
+                أهلاً يا عمر! أنا <b>Zeno</b>، جاهز أساعدك في أي كود، مشروع، أو فكرة تحب ننفذها. قول لي عاوز تبدأ بأيه؟ 🚀
+            </div>
+        </div>
     </div>
-    <div class="input-area">
-        <input type="text" id="userInput" placeholder="اكتب رسالتك هنا..." onkeydown="if(event.key==='Enter') sendMessage()">
-        <button onclick="sendMessage()">إرسال</button>
+
+    <div class="bg-slate-900/90 border-t border-slate-800 p-4 shadow-xl">
+        <div class="max-w-4xl mx-auto flex items-center gap-2">
+            <textarea id="userInput" rows="1" placeholder="اكتب رسالتك هنا يا غالي..." 
+                class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none max-h-32 transition"></textarea>
+            <button onclick="sendMessage()" id="sendBtn" 
+                class="bg-blue-600 hover:bg-blue-500 text-white w-12 h-12 rounded-xl flex items-center justify-center transition shadow-lg shadow-blue-600/30 shrink-0">
+                <i class="fa-solid fa-paper-plane text-sm"></i>
+            </button>
+        </div>
+        <p class="text-center text-[10px] text-slate-500 mt-2">Zeno AI Engine • Developed with ❤️ for Omar</p>
     </div>
-</div>
 
-<script>
-async function sendMessage() {
-    const input = document.getElementById('userInput');
-    const message = input.value.trim();
-    if (!message) return;
+    <script>
+        let chatHistory = [];
 
-    const chatBox = document.getElementById('chatBox');
-    
-    // إظهار رسالة المستخدم
-    chatBox.innerHTML += `<div class="message user-message">${message}</div>`;
-    input.value = '';
-    chatBox.scrollTop = chatBox.scrollHeight;
+        const chatContainer = document.getElementById('chatContainer');
+        const userInput = document.getElementById('userInput');
 
-    // إرسال للباك إند
-    try {
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: message })
+        // تكبير الـ Textarea تلقائياً مع الكتابة
+        userInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
         });
-        const data = await response.json();
-        
-        const botReply = data.response || data.error || "حدث خطأ في الاستجابة";
-        chatBox.innerHTML += `<div class="message bot-message">${botReply}</div>`;
-        chatBox.scrollTop = chatBox.scrollHeight;
-    } catch (err) {
-        chatBox.innerHTML += `<div class="message bot-message">تعذر الاتصال بالسيرفر.</div>`;
-    }
-}
-</script>
 
+        // إرسال بالضغط على Enter
+        userInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function appendMessage(sender, text) {
+            const isUser = sender === 'user';
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex items-start space-x-3 space-x-reverse ${isUser ? 'flex-row-reverse space-x-reverse' : ''}`;
+            
+            messageDiv.innerHTML = `
+                <div class="w-8 h-8 rounded-lg ${isUser ? 'bg-indigo-600' : 'bg-blue-600'} flex items-center justify-center text-white shrink-0 shadow">
+                    <i class="fa-solid ${isUser ? 'fa-user' : 'fa-robot'} text-sm"></i>
+                </div>
+                <div class="${isUser ? 'bg-blue-600 text-white rounded-tl-none' : 'bg-slate-800/80 border border-slate-700/60 text-slate-200 rounded-tr-none'} p-4 rounded-2xl max-w-[85%] leading-relaxed shadow-sm whitespace-pre-wrap">${text}</div>
+            `;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            userInput.value = '';
+            userInput.style.height = 'auto';
+            appendMessage('user', text);
+            
+            chatHistory.push({ role: 'user', content: text });
+
+            // مؤشر الكتابة للـ Bot
+            const loadingId = 'loading-' + Date.now();
+            const loadingDiv = document.createElement('div');
+            loadingDiv.id = loadingId;
+            loadingDiv.className = `flex items-start space-x-3 space-x-reverse`;
+            loadingDiv.innerHTML = `
+                <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0 shadow">
+                    <i class="fa-solid fa-robot text-sm"></i>
+                </div>
+                <div class="bg-slate-800/80 border border-slate-700/60 p-4 rounded-2xl rounded-tr-none text-slate-400 italic">
+                    جاري التفكير... <i class="fa-solid fa-spinner animate-spin"></i>
+                </div>
+            `;
+            chatContainer.appendChild(loadingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, history: chatHistory })
+                });
+
+                const data = await response.json();
+                document.getElementById(loadingId).remove();
+
+                if (response.ok) {
+                    appendMessage('bot', data.response);
+                    chatHistory.push({ role: 'assistant', content: data.response });
+                } else {
+                    appendMessage('bot', data.response || 'حدث خطأ ما.');
+                }
+            } catch (err) {
+                document.getElementById(loadingId).remove();
+                appendMessage('bot', 'فشل الاتصال بالسيرفر.');
+            }
+        }
+
+        function clearChat() {
+            chatHistory = [];
+            chatContainer.innerHTML = `
+                <div class="flex items-start space-x-3 space-x-reverse">
+                    <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0 shadow">
+                        <i class="fa-solid fa-robot text-sm"></i>
+                    </div>
+                    <div class="bg-slate-800/80 border border-slate-700/60 p-4 rounded-2xl rounded-tr-none max-w-[85%] text-slate-200 leading-relaxed shadow-sm">
+                        تم مسح الذاكرة وبدء محادثة جديدة يا عمر! قول لي عاوز نعمل أيه؟ ⚡
+                    </div>
+                </div>
+            `;
+        }
+    </script>
 </body>
 </html>
