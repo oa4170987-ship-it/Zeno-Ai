@@ -19,8 +19,13 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # قائمة الموديلات المخصصة للمحادثة فقط بالترتيب
-        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        # قائمة أسماء الموديلات النشطة عالمياً في Groq
+        models_to_try = [
+            "deepseek-r1-distill-llama-70b",
+            "gemma2-9b-it",
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-3b-preview"
+        ]
         
         for model_name in models_to_try:
             payload = {
@@ -28,14 +33,12 @@ def chat():
                 "messages": [{"role": "user", "content": user_message}]
             }
             response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
-            data = response.json()
-            
             if response.status_code == 200:
+                data = response.json()
                 bot_text = data['choices'][0]['message']['content']
                 return jsonify({"response": bot_text})
                 
-        # لو الموديلين فيهم مشكلة يرجع الخطأ
-        return jsonify({"error": data.get("error", {}).get("message", "خطأ في الاتصال")}), 500
+        return jsonify({"error": "يرجى التأكد من تفعيل API Key من لوحة التحكم"}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
