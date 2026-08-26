@@ -5,7 +5,7 @@ import os
 app = Flask(__name__)
 
 # تهيئة عميل Gemini (بيسحب المفتاح تلقائياً من GEMINI_API_KEY)
-client = genai.Client()
+client = genai.Client(AQ.Ab8RN6LX7Vc-e2oVber8j49PjBBA9ZijizZcFTy3OLaS3teBSw)
 
 @app.route("/chat", methods=["POST"])
 def chat():
