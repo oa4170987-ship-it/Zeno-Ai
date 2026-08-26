@@ -19,7 +19,7 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # 1. جلب قائمة النماذج المتاحة فوراً لحسابك
+        # 1. جلب قائمة النماذج وتصفية موديلات الشات الفعالة فقط
         models_url = "https://api.groq.com/openai/v1/models"
         models_response = requests.get(models_url, headers=headers)
         
@@ -27,9 +27,19 @@ def chat():
             return jsonify({"error": "مشكلة في الاتصال بـ Groq API"}), 500
             
         models_data = models_response.json()
-        active_model = models_data['data'][0]['id']  # بيختار أول موديل فعال عندك تلقائياً
+        
+        # فلترة الموديلات واختيار أول موديل مناسب للمحادثة (زي llama أو mixtral أو gemma)
+        active_model = None
+        for m in models_data.get('data', []):
+            m_id = m.get('id', '')
+            if any(k in m_id for k in ['llama', 'mixtral', 'gemma']) and 'guard' not in m_id:
+                active_model = m_id
+                break
+                
+        if not active_model:
+            active_model = models_data['data'][0]['id']
 
-        # 2. إرسال الرسالة للموديل المتاح
+        # 2. إرسال الرسالة للموديل المختار
         chat_url = "https://api.groq.com/openai/v1/chat/completions"
         payload = {
             "model": active_model,
