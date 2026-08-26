@@ -19,29 +19,25 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # قائمة أسماء الموديلات النشطة عالمياً في Groq
-        models_to_try = [
-            "deepseek-r1-distill-llama-70b",
-            "gemma2-9b-it",
-            "llama-3.2-11b-vision-preview",
-            "llama-3.2-3b-preview"
-        ]
+        # تجربة الموديل المعياري الأساسي لـ Groq
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": user_message}]
+        }
         
-        for model_name in models_to_try:
-            payload = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": user_message}]
-            }
-            response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                bot_text = data['choices'][0]['message']['content']
-                return jsonify({"response": bot_text})
-                
-        return jsonify({"error": "يرجى التأكد من تفعيل API Key من لوحة التحكم"}), 500
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
+        data = response.json()
+        
+        if response.status_code == 200:
+            bot_text = data['choices'][0]['message']['content']
+            return jsonify({"response": bot_text})
+        else:
+            # إرجاع تفاصيل الخطأ المباشرة لمعرفة المشكلة فوراً
+            error_msg = data.get("error", {}).get("message", "خطأ في الاتصال")
+            return jsonify({"response": f"خطأ من API: {error_msg}"})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"response": f"خطأ في السيرفر: {str(e)}"})
 
 if __name__ == "__main__":
     app.run(debug=True)
