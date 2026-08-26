@@ -4,8 +4,10 @@ from google import genai
 
 app = Flask(__name__)
 
-# قراءة المفتاح من البيئة أو استخدام المفتاح المباشر
-API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6LX7Vc-e2oVber8j49PjBBA9ZijizZcFTy3OLaS3teBSw")
+# استخدام المفتاح
+API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Lo1X2GL-SvTGCT5NPkfj-LZBxnPRy2XdKyB_nl45tNsw")
+
+# تهيئة الـ Client
 client = genai.Client(api_key=API_KEY)
 
 @app.route("/")
@@ -16,6 +18,8 @@ def index():
 def chat():
     try:
         user_message = request.json.get("message", "")
+        
+        # استدعاء النموذج
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=user_message,
