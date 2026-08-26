@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__)
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-2.5-flash"
 MAX_HISTORY_MESSAGES = 20
 MAX_INPUT_CHARS = 30000
 
