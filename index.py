@@ -19,44 +19,23 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # 1. جلب قائمة النماذج وتصفية موديلات الشات الفعالة فقط
-        models_url = "https://api.groq.com/openai/v1/models"
-        models_response = requests.get(models_url, headers=headers)
+        # قائمة الموديلات المخصصة للمحادثة فقط بالترتيب
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         
-        if models_response.status_code != 200:
-            return jsonify({"error": "مشكلة في الاتصال بـ Groq API"}), 500
+        for model_name in models_to_try:
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": user_message}]
+            }
+            response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
+            data = response.json()
             
-        models_data = models_response.json()
-        
-        # فلترة الموديلات واختيار أول موديل مناسب للمحادثة (زي llama أو mixtral أو gemma)
-        active_model = None
-        for m in models_data.get('data', []):
-            m_id = m.get('id', '')
-            if any(k in m_id for k in ['llama', 'mixtral', 'gemma']) and 'guard' not in m_id:
-                active_model = m_id
-                break
+            if response.status_code == 200:
+                bot_text = data['choices'][0]['message']['content']
+                return jsonify({"response": bot_text})
                 
-        if not active_model:
-            active_model = models_data['data'][0]['id']
-
-        # 2. إرسال الرسالة للموديل المختار
-        chat_url = "https://api.groq.com/openai/v1/chat/completions"
-        payload = {
-            "model": active_model,
-            "messages": [
-                {"role": "user", "content": user_message}
-            ]
-        }
-        
-        response = requests.post(chat_url, json=payload, headers=headers)
-        data = response.json()
-        
-        if response.status_code == 200:
-            bot_text = data['choices'][0]['message']['content']
-            return jsonify({"response": bot_text})
-        else:
-            error_msg = data.get("error", {}).get("message", "حدث خطأ في الاتصال")
-            return jsonify({"error": error_msg}), 500
+        # لو الموديلين فيهم مشكلة يرجع الخطأ
+        return jsonify({"error": data.get("error", {}).get("message", "خطأ في الاتصال")}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
