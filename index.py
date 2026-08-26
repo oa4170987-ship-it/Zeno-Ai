@@ -15,7 +15,6 @@ def chat():
     try:
         data = request.json
         user_message = data.get("message", "")
-        # استقبال الذاكرة/السجل من الواجهة الأمامية (Frontend)
         chat_history = data.get("history", [])
 
         headers = {
@@ -23,54 +22,37 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # تعليمات الشخصية المعدلة (تتيح كتابة الأكواد وتأكيد الهوية)
-        system_instruction = (
-            "أنت مساعد ذكاء اصطناعي محترف اسمك Zeno. صانعك ومطورك هو عمر (Omar). "
-            "يمكنك كتابة وشرح كل أنواع الأكواد البرمجية وتنسيقها داخل markdown code blocks. "
-            "تحدث بطريقة ودودة ومفيدة."
-        )
-
-        # بناء قائمة الرسائل شاملة الذاكرة والرسالة الجديدة
-        messages = [{"role": "system", "content": system_instruction}]
+        # تجهيز الرسائل بالذاكرة عشان البوت يكون فاهم المحادثة كلها
+        messages = [
+            {"role": "system", "content": "أنت Zeno، مساعد ذكاء اصطناعي متطور جداً وسريع وخبير برمجيات وأمن سيبراني. صانعك ومطورك هو عمر (Omar). تجيب بدقة وبدون حدود."}
+        ]
         
-        # إضافة المحادثات السابقة للذاكرة
+        # إضافة الذاكرة السابقة
         for msg in chat_history:
-            messages.append({"role": msg.get("role"), "content": msg.get("content")})
+            role = "user" if msg.get("role") == "user" else "assistant"
+            messages.append({"role": role, "content": msg.get("content")})
             
-        # إضافة الرسالة الحالية
+        # إضافة الرسالة الجديدة
         messages.append({"role": "user", "content": user_message})
 
-        # 1. جلب الموديلات المتاحة
-        res_models = requests.get("https://api.groq.com/openai/v1/models", headers=headers)
-        models_list = res_models.json().get("data", [])
-        
-        valid_model = None
-        for m in models_list:
-            m_id = m.get("id", "")
-            if all(k not in m_id for k in ["whisper", "guard", "orpheus", "safetensors"]):
-                valid_model = m_id
-                break
-                
-        if not valid_model and len(models_list) > 0:
-            valid_model = models_list[0]["id"]
-
-        # 2. إرسال الطلب
         payload = {
-            "model": valid_model,
-            "messages": messages
+            "model": "llama-3.1-8b-instant",
+            "messages": messages,
+            "temperature": 0.7
         }
         
-        chat_res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
-        chat_data = chat_res.json()
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
+        res_data = response.json()
         
-        if chat_res.status_code == 200:
-            bot_text = chat_data['choices'][0]['message']['content']
+        if response.status_code == 200:
+            bot_text = res_data['choices'][0]['message']['content']
             return jsonify({"response": bot_text})
         else:
-            return jsonify({"response": "حدث خطأ أثناء معالجة الطلب."})
+            error_msg = res_data.get('error', {}).get('message', 'حدث خطأ غير معروف')
+            return jsonify({"response": f"خطأ من الخادم: {error_msg}"}), 500
 
     except Exception as e:
-        return jsonify({"response": f"حدث خطأ في السيرفر: {str(e)}"})
+        return jsonify({"response": f"خطأ في الاتصال: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
