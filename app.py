@@ -4,20 +4,17 @@ from google import genai
 from google.genai import types
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "omar_zeno_super_secret_key_2026")
+app.secret_key = "omar_zeno_super_secret_key_2026"
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+# حط مفتاح الـ API بتاعك هنا مباشرة عشان يشتغل معاك محلياً من غير وجع دماغ
+API_KEY = "حط_مفتاحك_هنا_يا_عمر"
 MODEL = "gemini-3.6-flash"
-MAX_HISTORY_MESSAGES = 20
 
 SYSTEM_INSTRUCTION = """أنت Zeno، نظام ذكاء اصطناعي خارق، سريع للغاية، ودقيق. تم تطويرك وبرمجتك بواسطة المطور العبقري عمر (Omar). ساعده بكل قوة واحترافية."""
 
 def get_client():
-    if not API_KEY:
-        raise RuntimeError("GEMINI_API_KEY غير موجود في متغيرات البيئة.")
     return genai.Client(api_key=API_KEY)
 
-# واجهة تسجيل الدخول والدردشة الشاملة
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -31,7 +28,6 @@ UI_TEMPLATE = """
 <body class="bg-gray-950 text-gray-100 h-screen flex flex-col justify-between selection:bg-blue-600 selection:text-white">
     
     {% if not session.get('logged_in') %}
-    <!-- صفحة تسجيل الدخول -->
     <div class="flex-1 flex items-center justify-center p-4">
         <div class="bg-gray-900 border border-gray-800 p-8 rounded-2xl max-w-md w-full shadow-2xl text-center space-y-6">
             <div class="w-16 h-16 bg-blue-600/20 text-blue-400 rounded-2xl flex items-center justify-center mx-auto text-2xl border border-blue-500/30">
@@ -42,13 +38,12 @@ UI_TEMPLATE = """
                 <p class="text-xs text-gray-400 mt-1">مطور النظام: <span class="text-blue-400 font-semibold">عمر</span></p>
             </div>
             <form method="POST" action="/login" class="space-y-4">
-                <input type="password" name="password" placeholder="أدخل كلمة المرور..." required class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 text-center">
+                <input type="password" name="password" placeholder="أدخل كلمة المرور (omar2026)..." required class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 text-center">
                 <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-bold text-sm transition shadow-lg shadow-blue-600/20">دخول للنظام الخارق</button>
             </form>
         </div>
     </div>
     {% else %}
-    <!-- واجهة الدردشة الذكية والذاكرة العميق -->
     <header class="bg-gray-900/80 backdrop-blur-md border-b border-gray-800 p-4 flex justify-between items-center z-10">
         <div class="flex items-center gap-3">
             <h1 class="font-bold text-lg text-blue-400 flex items-center gap-2">
@@ -64,7 +59,7 @@ UI_TEMPLATE = """
 
     <main id="chatBox" class="flex-1 overflow-y-auto p-4 space-y-4 max-w-4xl w-full mx-auto">
         <div class="bg-gray-900/90 border border-gray-800 p-4 rounded-2xl text-sm shadow-md max-w-xl">
-            أهلاً بك يا عمر في النظام الخارق! الذاكرة مفعلة، والموديل يعمل بأعلى كفاءة. كيف أساعدك اليوم؟ ⚡
+            أهلاً بك يا عمر في النظام الخارق! الذاكرة مفعلة والموديل جاهز. كيف أساعدك اليوم؟ ⚡
         </div>
     </main>
 
@@ -100,11 +95,10 @@ UI_TEMPLATE = """
                 chatBox.innerHTML += `<div class="bg-gray-900 border border-gray-800 p-3.5 rounded-2xl text-sm max-w-[80%] shadow-md">${data.response}</div>`;
                 chatBox.scrollTop = chatBox.scrollHeight;
                 
-                // تحديث الذاكرة المحلية (Context Memory)
                 history.push({role: 'user', content: text}, {role: 'assistant', content: data.response});
                 if(history.length > 20) history = history.slice(-20);
             } catch (err) {
-                chatBox.innerHTML += `<div class="bg-red-900/50 border border-red-700 p-3.5 rounded-2xl text-sm">حدث خطأ في الاتصال بالشبكة.</div>`;
+                chatBox.innerHTML += `<div class="bg-red-900/50 border border-red-700 p-3.5 rounded-2xl text-sm">حدث خطأ في الاتصال.</div>`;
             }
         }
     </script>
@@ -120,7 +114,6 @@ def home():
 @app.route("/login", methods=["POST"])
 def login():
     password = request.form.get("password", "")
-    # الباسورد الافتراضي للتسجيل (تقدر تغيره للي تعوزه)
     if password == "omar2026":
         session['logged_in'] = True
     return redirect(url_for('home'))
@@ -153,7 +146,7 @@ def chat():
         )
         return jsonify({"response": resp.text.strip()})
     except Exception as e:
-        return jsonify({"response": f"خطأ في معالجة الذكاء الاصطناعي: {str(e)}"}), 500
+        return jsonify({"response": f"خطأ: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(port=5000)
