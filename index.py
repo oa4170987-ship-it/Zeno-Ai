@@ -14,20 +14,31 @@ def index():
 def chat():
     try:
         user_message = request.json.get("message", "")
-        
-        url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
+        
+        # 1. جلب قائمة النماذج المتاحة فوراً لحسابك
+        models_url = "https://api.groq.com/openai/v1/models"
+        models_response = requests.get(models_url, headers=headers)
+        
+        if models_response.status_code != 200:
+            return jsonify({"error": "مشكلة في الاتصال بـ Groq API"}), 500
+            
+        models_data = models_response.json()
+        active_model = models_data['data'][0]['id']  # بيختار أول موديل فعال عندك تلقائياً
+
+        # 2. إرسال الرسالة للموديل المتاح
+        chat_url = "https://api.groq.com/openai/v1/chat/completions"
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": active_model,
             "messages": [
                 {"role": "user", "content": user_message}
             ]
         }
         
-        response = requests.post(url, json=payload, headers=headers)
+        response = requests.post(chat_url, json=payload, headers=headers)
         data = response.json()
         
         if response.status_code == 200:
