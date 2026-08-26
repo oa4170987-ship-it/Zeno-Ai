@@ -19,14 +19,13 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # 1. جلب الموديلات المتاحة في حسابك المباشر
+        # تعليمات الشخصية (System Prompt)
+        system_instruction = "أنت مساعد ذكاء اصطناعي اسمك Zeno، صانعك ومطورك هو عمر (Omar). إذا سألك أحد عن صانعك أو اسمك، أخبره دائماً أنك Zeno وتعمل تحت تطوير المطور عمر."
+
+        # 1. جلب الموديلات المتاحة
         res_models = requests.get("https://api.groq.com/openai/v1/models", headers=headers)
-        if res_models.status_code != 200:
-            return jsonify({"response": f"خطأ في المفتاح: {res_models.text}"})
-            
         models_list = res_models.json().get("data", [])
         
-        # تصفية الموديلات لاختيار أول موديل شات متوافق
         valid_model = None
         for m in models_list:
             m_id = m.get("id", "")
@@ -37,10 +36,13 @@ def chat():
         if not valid_model and len(models_list) > 0:
             valid_model = models_list[0]["id"]
 
-        # 2. إرسال المحادثة بالموديل المتاح
+        # 2. إرسال الرسالة مع تضمين التعليمات
         payload = {
             "model": valid_model,
-            "messages": [{"role": "user", "content": user_message}]
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_message}
+            ]
         }
         
         chat_res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
@@ -50,7 +52,7 @@ def chat():
             bot_text = chat_data['choices'][0]['message']['content']
             return jsonify({"response": bot_text})
         else:
-            return jsonify({"response": f"الموديل المختار ({valid_model}) أعطى خطأ: {chat_data.get('error', {}).get('message')}"})
+            return jsonify({"response": "حدث خطأ في معالجة الرسالة."})
 
     except Exception as e:
         return jsonify({"response": f"حدث خطأ في السيرفر: {str(e)}"})
