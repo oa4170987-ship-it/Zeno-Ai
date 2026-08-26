@@ -13,14 +13,32 @@ def index():
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
-        user_message = request.json.get("message", "")
+        data = request.json
+        user_message = data.get("message", "")
+        # استقبال الذاكرة/السجل من الواجهة الأمامية (Frontend)
+        chat_history = data.get("history", [])
+
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # تعليمات الشخصية (System Prompt)
-        system_instruction = "أنت مساعد ذكاء اصطناعي اسمك Zeno، صانعك ومطورك هو عمر (Omar). إذا سألك أحد عن صانعك أو اسمك، أخبره دائماً أنك Zeno وتعمل تحت تطوير المطور عمر."
+        # تعليمات الشخصية المعدلة (تتيح كتابة الأكواد وتأكيد الهوية)
+        system_instruction = (
+            "أنت مساعد ذكاء اصطناعي محترف اسمك Zeno. صانعك ومطورك هو عمر (Omar). "
+            "يمكنك كتابة وشرح كل أنواع الأكواد البرمجية وتنسيقها داخل markdown code blocks. "
+            "تحدث بطريقة ودودة ومفيدة."
+        )
+
+        # بناء قائمة الرسائل شاملة الذاكرة والرسالة الجديدة
+        messages = [{"role": "system", "content": system_instruction}]
+        
+        # إضافة المحادثات السابقة للذاكرة
+        for msg in chat_history:
+            messages.append({"role": msg.get("role"), "content": msg.get("content")})
+            
+        # إضافة الرسالة الحالية
+        messages.append({"role": "user", "content": user_message})
 
         # 1. جلب الموديلات المتاحة
         res_models = requests.get("https://api.groq.com/openai/v1/models", headers=headers)
@@ -29,20 +47,17 @@ def chat():
         valid_model = None
         for m in models_list:
             m_id = m.get("id", "")
-            if "whisper" not in m_id and "guard" not in m_id and "orpheus" not in m_id and "safetensors" not in m_id:
+            if all(k not in m_id for k in ["whisper", "guard", "orpheus", "safetensors"]):
                 valid_model = m_id
                 break
                 
         if not valid_model and len(models_list) > 0:
             valid_model = models_list[0]["id"]
 
-        # 2. إرسال الرسالة مع تضمين التعليمات
+        # 2. إرسال الطلب
         payload = {
             "model": valid_model,
-            "messages": [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_message}
-            ]
+            "messages": messages
         }
         
         chat_res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
@@ -52,7 +67,7 @@ def chat():
             bot_text = chat_data['choices'][0]['message']['content']
             return jsonify({"response": bot_text})
         else:
-            return jsonify({"response": "حدث خطأ في معالجة الرسالة."})
+            return jsonify({"response": "حدث خطأ أثناء معالجة الطلب."})
 
     except Exception as e:
         return jsonify({"response": f"حدث خطأ في السيرفر: {str(e)}"})
