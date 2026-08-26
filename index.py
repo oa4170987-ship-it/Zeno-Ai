@@ -19,25 +19,41 @@ def chat():
             "Content-Type": "application/json"
         }
         
-        # تجربة الموديل المعياري الأساسي لـ Groq
+        # 1. جلب الموديلات المتاحة في حسابك المباشر
+        res_models = requests.get("https://api.groq.com/openai/v1/models", headers=headers)
+        if res_models.status_code != 200:
+            return jsonify({"response": f"خطأ في المفتاح: {res_models.text}"})
+            
+        models_list = res_models.json().get("data", [])
+        
+        # تصفية الموديلات لاختيار أول موديل شات متوافق
+        valid_model = None
+        for m in models_list:
+            m_id = m.get("id", "")
+            if "whisper" not in m_id and "guard" not in m_id and "orpheus" not in m_id and "safetensors" not in m_id:
+                valid_model = m_id
+                break
+                
+        if not valid_model and len(models_list) > 0:
+            valid_model = models_list[0]["id"]
+
+        # 2. إرسال المحادثة بالموديل المتاح
         payload = {
-            "model": "llama-3.1-8b-instant",
+            "model": valid_model,
             "messages": [{"role": "user", "content": user_message}]
         }
         
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
-        data = response.json()
+        chat_res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
+        chat_data = chat_res.json()
         
-        if response.status_code == 200:
-            bot_text = data['choices'][0]['message']['content']
+        if chat_res.status_code == 200:
+            bot_text = chat_data['choices'][0]['message']['content']
             return jsonify({"response": bot_text})
         else:
-            # إرجاع تفاصيل الخطأ المباشرة لمعرفة المشكلة فوراً
-            error_msg = data.get("error", {}).get("message", "خطأ في الاتصال")
-            return jsonify({"response": f"خطأ من API: {error_msg}"})
+            return jsonify({"response": f"الموديل المختار ({valid_model}) أعطى خطأ: {chat_data.get('error', {}).get('message')}"})
 
     except Exception as e:
-        return jsonify({"response": f"خطأ في السيرفر: {str(e)}"})
+        return jsonify({"response": f"حدث خطأ في السيرفر: {str(e)}"})
 
 if __name__ == "__main__":
     app.run(debug=True)
