@@ -4,7 +4,6 @@ import requests
 
 app = Flask(__name__)
 
-# مفتاح Groq الخاص بك
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 
 @app.route("/")
@@ -22,7 +21,7 @@ def chat():
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "llama-3.1-8b-instant",
             "messages": [
                 {"role": "user", "content": user_message}
             ]
