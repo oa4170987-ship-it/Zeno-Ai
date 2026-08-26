@@ -4,8 +4,8 @@ import requests
 
 app = Flask(__name__)
 
-# المفتاح بتاعك
-API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6L25dgm0wRcEpdwbZrwQzQXLiYmd957l7HlFLCr04g4qw")
+# مفتاح Groq الخاص بك
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 
 @app.route("/")
 def index():
@@ -16,23 +16,27 @@ def chat():
     try:
         user_message = request.json.get("message", "")
         
-        # الاتصال المباشر بـ REST API بدلاً من المكتبات
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
-        headers = {'Content-Type': 'application/json'}
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
         payload = {
-            "contents": [{
-                "parts": [{"text": user_message}]
-            }]
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "user", "content": user_message}
+            ]
         }
         
         response = requests.post(url, json=payload, headers=headers)
         data = response.json()
         
         if response.status_code == 200:
-            bot_text = data['candidates'][0]['content']['parts'][0]['text']
+            bot_text = data['choices'][0]['message']['content']
             return jsonify({"response": bot_text})
         else:
-            return jsonify({"error": data.get("error", {}).get("message", "حدث خطأ في الاتصال")}), 500
+            error_msg = data.get("error", {}).get("message", "حدث خطأ في الاتصال")
+            return jsonify({"error": error_msg}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
