@@ -35,8 +35,8 @@ def chat():
         # إضافة الرسالة الجديدة
         messages.append({"role": "user", "content": user_message})
 
-        payload = {
-            "model": "llama-3.1-8b-instant",
+    payload = {
+            "model": "llama3-8b-8192",
             "messages": messages,
             "temperature": 0.7
         }
