@@ -4,19 +4,17 @@ from flask import Flask, render_template_string, request, jsonify
 from google import genai
 from google.genai import types
 
-# ==========================================
-# 1. إعدادات النظام وتسجيل الأحداث
-# ==========================================
+# 1. تعريف التطبيق فوراً عشان Vercel يقرأه بدون مشاكل
+app = Flask(__name__)
+
+# 2. إعدادات النظام وتسجيل الأحداث
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 logger = logging.getLogger("ZenoSystem")
 
-app = Flask(__name__)
-
-# استخدام موديل مستقر لتجنب مشاكل الضغط 503
+# 3. إعدادات الموديل والتعليمات
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_HISTORY = 40
 
-# تحديث ذكاء زينو (System Instruction)
 SYSTEM_INSTRUCTION = """أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
 تم إنشاؤك وتطويرك حصرياً بواسطة المطور العبقري "عمر" (Omar).
 تعليماتك الأساسية:
@@ -31,9 +29,7 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
-# ==========================================
-# 2. الواجهة الاحترافية (Premium Dark Mode UI)
-# ==========================================
+# 4. الواجهة الاحترافية (Premium Dark Mode UI) بدون باسورد
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -117,7 +113,6 @@ UI_TEMPLATE = """
 
         <!-- صندوق الرسائل -->
         <div id="chatBox" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 pb-40 scroll-smooth flex flex-col items-center">
-            
             <div class="text-center my-10 animate-fade-in">
                 <div class="w-20 h-20 mx-auto bg-msgbg rounded-full flex items-center justify-center text-4xl mb-4 border border-gray-700 shadow-xl">
                     <i class="fa-solid fa-atom text-blue-500"></i>
@@ -125,7 +120,6 @@ UI_TEMPLATE = """
                 <h2 class="text-2xl font-bold text-gray-100">كيف يمكنني مساعدتك اليوم؟</h2>
                 <p class="text-gray-400 mt-2 text-sm">Zeno Advanced AI - V 3.0</p>
             </div>
-
         </div>
 
         <!-- منطقة الإدخال -->
@@ -178,4 +172,162 @@ UI_TEMPLATE = """
             const finalContent = isUser ? escapeHTML(content) : marked.parse(content);
             
             const msgDiv = document.createElement('div');
-            msgDiv.className = `w-full max-w-3xl mx
+            msgDiv.className = `w-full max-w-3xl mx-auto flex gap-4 ${isUser ? 'flex-row-reverse' : ''} mb-6`;
+            
+            const avatar = isUser ? 
+                `<div class="w-8 h-8 rounded-full bg-userbg flex-shrink-0 flex items-center justify-center text-white text-xs font-bold mt-1">OM</div>` : 
+                `<div class="w-8 h-8 rounded-full bg-emerald-600 flex-shrink-0 flex items-center justify-center text-white mt-1 shadow-lg shadow-emerald-600/20"><i class="fa-solid fa-atom"></i></div>`;
+            
+            const bubbleClass = isUser ? 'bg-msgbg px-5 py-3 rounded-2xl rounded-tl-sm text-gray-100 max-w-[85%]' : 'text-gray-200 prose prose-invert max-w-full leading-relaxed w-full';
+
+            msgDiv.innerHTML = `
+                ${avatar}
+                <div class="${bubbleClass} break-words overflow-hidden">
+                    ${finalContent}
+                </div>
+            `;
+            chatBox.appendChild(msgDiv);
+            scrollToBottom();
+            
+            if(!isUser) {
+                document.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
+            }
+        }
+
+        function showTyping() {
+            clearWelcomeMessage();
+            const msgDiv = document.createElement('div');
+            msgDiv.id = 'typingIndicator';
+            msgDiv.className = `w-full max-w-3xl mx-auto flex gap-4 mb-6`;
+            msgDiv.innerHTML = `
+                <div class="w-8 h-8 rounded-full bg-emerald-600 flex-shrink-0 flex items-center justify-center text-white mt-1"><i class="fa-solid fa-atom"></i></div>
+                <div class="flex items-center gap-1 h-8 px-2">
+                    <div class="w-2 h-2 bg-gray-500 rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-gray-500 rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-gray-500 rounded-full typing-dot"></div>
+                </div>
+            `;
+            chatBox.appendChild(msgDiv);
+            scrollToBottom();
+        }
+
+        function hideTyping() {
+            const el = document.getElementById('typingIndicator');
+            if(el) el.remove();
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+            
+            userInput.value = '';
+            userInput.style.height = 'auto';
+            sendBtn.disabled = true;
+
+            appendMessage('user', text);
+            showTyping();
+
+            try {
+                const res = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ message: text, history: history })
+                });
+                
+                hideTyping();
+                const data = await res.json();
+                
+                if(res.ok) {
+                    appendMessage('assistant', data.response);
+                    history.push({role: 'user', content: text}, {role: 'assistant', content: data.response});
+                    if(history.length > 40) history = history.slice(-40);
+                } else {
+                    appendMessage('assistant', `⚠️ **خطأ سحابي:** ${data.error || "مؤقت من سيرفرات جوجل، جرب كمان شوية."}`);
+                }
+            } catch (err) {
+                hideTyping();
+                appendMessage('assistant', "⚠️ **خطأ اتصال:** تأكد من الإنترنت الخاص بك.");
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        function clearMemory() {
+            history = [];
+            hasStarted = false;
+            chatBox.innerHTML = `
+                <div class="text-center my-10 animate-fade-in">
+                    <div class="w-20 h-20 mx-auto bg-msgbg rounded-full flex items-center justify-center text-4xl mb-4 border border-gray-700 shadow-xl">
+                        <i class="fa-solid fa-atom text-blue-500"></i>
+                    </div>
+                    <h2 class="text-2xl font-bold text-gray-100">تم مسح الذاكرة</h2>
+                    <p class="text-gray-400 mt-2 text-sm">أنا مستعد لموضوع جديد يا عمر.</p>
+                </div>
+            `;
+        }
+
+        function exportChat() {
+            if(history.length === 0) return alert('لا يوجد محادثة لتصديرها!');
+            let textData = "Zeno AI Chat Export\\n===================\\n\\n";
+            history.forEach(msg => { textData += `[${msg.role === 'user' ? "عمر" : "Zeno"}]:\\n${msg.content}\\n\\n---\\n\\n`; });
+            const blob = new Blob([textData], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Zeno_Chat.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        function scrollToBottom() { chatBox.scrollTo({ top: chatBox.scrollHeight, behavior: 'smooth' }); }
+        function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag])); }
+    </script>
+</body>
+</html>
+"""
+
+# 5. دوال التوجيه (Routes)
+@app.route("/")
+def home():
+    return render_template_string(UI_TEMPLATE)
+
+@app.post("/chat")
+def chat():
+    try:
+        data = request.get_json(silent=True) or {}
+        msg = str(data.get("message", "")).strip()
+        client_history = data.get("history", [])
+        
+        if not msg:
+            return jsonify({"error": "الرسالة فارغة."}), 400
+
+        client = get_client()
+        contents = []
+        
+        for h in client_history[-MAX_HISTORY:]:
+            role = "model" if h.get("role") == "assistant" else "user"
+            content = str(h.get("content", "")).strip()
+            if content:
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
+                
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg)]))
+
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.7,
+                max_output_tokens=8192,
+            )
+        )
+        
+        return jsonify({"response": resp.text.strip() if resp.text else "عذراً، لم أتمكن من تكوين إجابة."})
+
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
