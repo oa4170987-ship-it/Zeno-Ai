@@ -1,24 +1,21 @@
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
+app = Flask(__name__)
+
 import os
 import logging
 import base64
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from google import genai
 from google.genai import types
 
-# 1. تعريف التطبيق وإعداد مفتاح الجلسات (مهم جداً لنظام الحسابات)
-app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026")
 
-# 2. إعدادات النظام وتسجيل الأحداث
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 logger = logging.getLogger("ZenoSystem")
 
-# 3. إعدادات الموديل (استخدام 1.5-flash لضمان السرعة الخارقة وعدم وجود قيود مزعجة)
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 MAX_HISTORY = 40
 
 def get_dynamic_instruction(username):
-    """دالة لتوليد تعليمات زينو ديناميكياً بناءً على اسم المستخدم"""
     return f"""أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
 أنت تتحدث الآن مع المستخدم: "{username}".
 تعليماتك الأساسية:
@@ -34,7 +31,6 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
-# 4. الواجهة الاحترافية (شاشة الدخول + شاشة الشات)
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -79,7 +75,6 @@ UI_TEMPLATE = """
 <body class="flex">
 
     {% if not username %}
-    <!-- شاشة تسجيل الدخول -->
     <div class="flex-1 flex items-center justify-center p-4 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] relative w-full">
         <div class="absolute inset-0 bg-blue-900/5 backdrop-blur-sm z-0"></div>
         <div class="bg-gray-900/90 border border-gray-800 p-8 rounded-3xl max-w-md w-full shadow-2xl text-center space-y-8 z-10 backdrop-blur-xl">
@@ -99,7 +94,6 @@ UI_TEMPLATE = """
         </div>
     </div>
     {% else %}
-    <!-- القائمة الجانبية -->
     <aside class="w-64 bg-sidebarbg hidden md:flex flex-col border-l border-gray-800 h-full">
         <div class="p-4">
             <button onclick="clearMemory()" class="w-full flex items-center justify-between bg-transparent hover:bg-gray-800 text-gray-200 border border-gray-700 px-4 py-3 rounded-lg transition text-sm">
@@ -118,15 +112,4 @@ UI_TEMPLATE = """
         </div>
         <div class="p-4 border-t border-gray-800 flex justify-between items-center">
             <div class="flex items-center gap-3 text-sm text-gray-200 font-semibold truncate">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 flex items-center justify-center text-white text-xs flex-shrink-0">
-                    {{ username[:2].upper() }}
-                </div>
-                <span class="truncate">{{ username }}</span>
-            </div>
-            <a href="/logout" class="text-red-400 hover:text-red-300 ml-2" title="تسجيل خروج"><i class="fa-solid fa-right-from-bracket"></i></a>
-        </div>
-    </aside>
-
-    <!-- منطقة الشات -->
-    <main class="flex-1 flex flex-col h-full relative bg-chatbg">
-        <header class="md:hidden bg-sidebarbg border-b border-gray-800 p-4 flex justify-between items
+                <div class="w-8 h-8 rounded-
