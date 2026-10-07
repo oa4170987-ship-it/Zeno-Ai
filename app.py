@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
+import time
 import logging
 import base64
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from google import genai
 from google.genai import types
 
-# 1. تعريف التطبيق (يجب أن يكون هنا لكي يقرأه Vercel بشكل صحيح)
+# 1. تعريف التطبيق
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026")
 
@@ -14,8 +15,8 @@ app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026")
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 logger = logging.getLogger("ZenoSystem")
 
-# 3. إعدادات الموديل (3.8-flash للسرعة القصوى)
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# 3. إعدادات الموديل (تم التحديث لنسخة 8b المصممة للضغط العالي والسرعة)
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_HISTORY = 40
 
 def get_dynamic_instruction(username):
@@ -34,7 +35,7 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
-# 4. واجهة المستخدم
+# 4. واجهة المستخدم (نفس الواجهة الأنيقة)
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -140,7 +141,7 @@ UI_TEMPLATE = """
                     <i class="fa-solid fa-atom text-blue-500"></i>
                 </div>
                 <h2 class="text-2xl font-bold text-gray-100">مرحباً بك يا {{ username }}</h2>
-                <p class="text-gray-400 mt-2 text-sm">Zeno AI جاهز لخدمتك بأقصى سرعة.</p>
+                <p class="text-gray-400 mt-2 text-sm">Zeno AI مستعد للعمل بأقصى سرعة وثبات.</p>
             </div>
         </div>
 
@@ -286,7 +287,7 @@ UI_TEMPLATE = """
                     history.push({role: 'assistant', content: data.response});
                     if(history.length > 40) history = history.slice(-40);
                 } else {
-                    appendMessage('assistant', `⚠️ **خطأ سحابي:** ${data.error}`);
+                    appendMessage('assistant', `⚠️ **خطأ:** ${data.error}`);
                 }
             } catch (err) {
                 hideTyping();
@@ -377,17 +378,30 @@ def chat():
         contents.append(types.Content(role="user", parts=user_parts))
         dynamic_instruction = get_dynamic_instruction(username)
 
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=dynamic_instruction,
-                temperature=0.7,
-                max_output_tokens=8192,
-            )
-        )
-        
-        return jsonify({"response": resp.text.strip() if resp.text else "عذراً، لم أتمكن من تكوين إجابة."})
+        # نظام المحاولة التلقائية (Auto-Retry) لتخطي خطأ 503
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = client.models.generate_content(
+                    model=MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=dynamic_instruction,
+                        temperature=0.7,
+                        max_output_tokens=8192,
+                    )
+                )
+                return jsonify({"response": resp.text.strip() if resp.text else "عذراً، لم أتمكن من تكوين إجابة."})
+            except Exception as api_err:
+                error_str = str(api_err)
+                if "503" in error_str and attempt < max_retries - 1:
+                    logger.warning(f"جوجل مشغول 503. إعادة المحاولة رقم {attempt + 1}...")
+                    time.sleep(2)  # استنى ثانيتين وجرب تاني بدون ما تزعج المستخدم
+                    continue
+                
+                # لو فشل 3 مرات أو فيه خطأ تاني غير 503
+                logger.error(f"Error: {error_str}")
+                return jsonify({"error": error_str}), 500
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
