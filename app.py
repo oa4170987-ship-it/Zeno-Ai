@@ -1,37 +1,30 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
-app = Flask(__name__)
-
 import os
 import time
 import logging
 import base64
-import requests
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from google import genai
 from google.genai import types
 
-app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026_enterprise")
+# 1. إعدادات التطبيق الأساسية
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026_local")
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
-
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
-USER_INFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-
+# 2. تسجيل الأحداث وإعدادات الموديل
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
-logger = logging.getLogger("ZenoEnterprise")
+logger = logging.getLogger("ZenoLocal")
 
+# استخدام الموديل القوي والسريع
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_HISTORY = 40
 
-def get_dynamic_instruction(user_name, user_email):
+def get_dynamic_instruction(username):
     return f"""أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
-أنت تتحدث الآن مع المستخدم: "{user_name}" (بريده الإلكتروني: {user_email}).
+أنت تتحدث الآن مع المستخدم: "{username}".
 تم تطويرك بواسطة المطور العبقري "أبو سعيد".
 تعليماتك الأساسية:
-1. رحب بالمستخدم باسمه الأول دائماً بأسلوب احترافي وودود.
+1. رحب بالمستخدم باسمه دائماً بأسلوب احترافي وودود.
 2. قدم إجابات عبقرية، سريعة، دقيقة، ومباشرة بدون حشو.
 3. إذا طُلب منك كود برمجي، اكتبه بأفضل الممارسات الهندسية (Clean Code).
 4. استخدم تنسيق Markdown باحترافية عالية.
@@ -43,6 +36,7 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
+# 3. واجهة المستخدم الفاخرة (تسجيل محلي بسيط وسريع)
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -72,13 +66,11 @@ UI_TEMPLATE = """
         .typing-dot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
         .glass-input { background: rgba(26, 29, 45, 0.85); backdrop-filter: blur(12px); border: 1px solid #2d324d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        .google-btn { background-color: #ffffff; color: #757575; border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; gap: 10px; transition: background-color 0.3s; }
-        .google-btn:hover { background-color: #f1f1f1; }
     </style>
 </head>
 <body class="flex">
 
-    {% if not session.get('user') %}
+    {% if not username %}
     <div class="flex-1 flex items-center justify-center p-4 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] relative w-full">
         <div class="absolute inset-0 bg-blue-900/10 backdrop-blur-md z-0"></div>
         <div class="bg-[#090a0f]/90 border border-[#2d324d] p-10 rounded-3xl max-w-md w-full shadow-2xl text-center space-y-8 z-10 backdrop-blur-2xl">
@@ -88,13 +80,15 @@ UI_TEMPLATE = """
             <div>
                 <h1 class="text-3xl font-extrabold text-white mb-2">Zeno AI</h1>
                 <p class="text-xs text-gray-400 font-semibold tracking-widest uppercase mb-6">Enterprise Edition by Abu Saeed</p>
-                <p class="text-sm text-gray-300">يجب تسجيل الدخول بحساب جوجل للوصول إلى النظام الخارق.</p>
+                <p class="text-sm text-gray-300">أدخل اسمك أو لقبك للولوج إلى النظام الخارق.</p>
             </div>
             
-            <a href="/login" class="google-btn w-full py-3.5 rounded-xl font-bold text-sm shadow-lg">
-                <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" class="w-6 h-6">
-                المتابعة باستخدام Google
-            </a>
+            <form method="POST" action="/login" class="space-y-5">
+                <input type="text" name="username" placeholder="اكتب اسمك هنا..." required autocomplete="off" class="w-full bg-[#1a1d2d] border border-[#2d324d] rounded-xl px-4 py-4 text-base focus:outline-none focus:border-blue-500 text-center text-white transition-colors shadow-inner">
+                <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 text-white py-4 rounded-xl font-bold text-sm transition-all shadow-lg shadow-blue-600/30">
+                    دخول للنظام <i class="fa-solid fa-arrow-left mr-2"></i>
+                </button>
+            </form>
         </div>
     </div>
     {% else %}
@@ -116,10 +110,12 @@ UI_TEMPLATE = """
         
         <div class="p-4 border-t border-[#2d324d] bg-[#0d0e15]">
             <div class="flex items-center gap-3">
-                <img src="{{ session.user.picture }}" alt="Profile" class="w-10 h-10 rounded-full border-2 border-blue-500 shadow-md">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold border-2 border-[#2d324d] shadow-lg">
+                    {{ username[:2].upper() }}
+                </div>
                 <div class="flex-1 overflow-hidden">
-                    <p class="text-sm font-bold text-gray-200 truncate">{{ session.user.name }}</p>
-                    <p class="text-[10px] text-gray-500 truncate">{{ session.user.email }}</p>
+                    <p class="text-sm font-bold text-gray-200 truncate">{{ username }}</p>
+                    <p class="text-[10px] text-gray-500 truncate">مطور النظام</p>
                 </div>
                 <a href="/logout" class="text-red-400 hover:text-red-300 bg-red-400/10 p-2 rounded-lg transition" title="تسجيل خروج">
                     <i class="fa-solid fa-power-off"></i>
@@ -131,7 +127,7 @@ UI_TEMPLATE = """
     <main class="flex-1 flex flex-col h-full relative bg-chatbg">
         <header class="md:hidden bg-sidebarbg border-b border-[#2d324d] p-4 flex justify-between items-center text-gray-200">
             <div class="flex items-center gap-2">
-                <img src="{{ session.user.picture }}" class="w-8 h-8 rounded-full border border-blue-500">
+                <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs">{{ username[:2].upper() }}</div>
                 <h1 class="font-bold text-md text-blue-400">Zeno</h1>
             </div>
             <div class="flex gap-4">
@@ -142,8 +138,10 @@ UI_TEMPLATE = """
 
         <div id="chatBox" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 pb-40 scroll-smooth flex flex-col items-center">
             <div class="text-center my-12 animate-fade-in">
-                <img src="{{ session.user.picture }}" class="w-24 h-24 mx-auto rounded-full border-4 border-[#2d324d] shadow-2xl mb-4">
-                <h2 class="text-3xl font-bold text-gray-100">أهلاً بك، {{ session.user.name.split(' ')[0] }}</h2>
+                <div class="w-24 h-24 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-4xl font-bold border-4 border-[#2d324d] shadow-2xl mb-4">
+                    {{ username[:2].upper() }}
+                </div>
+                <h2 class="text-3xl font-bold text-gray-100">أهلاً بك، {{ username.split(' ')[0] }}</h2>
                 <p class="text-gray-400 mt-2 text-sm">Zeno جاهز لتنفيذ أوامرك بأقصى ذكاء وسرعة.</p>
             </div>
         </div>
@@ -185,8 +183,8 @@ UI_TEMPLATE = """
         const fileIndicator = document.getElementById('fileIndicator');
         const fileNameDisplay = document.getElementById('fileName');
         
-        const userPicture = "{{ session.user.picture }}";
-        const userName = "{{ session.user.name }}";
+        const currentUser = "{{ username }}";
+        const userInitials = "{{ username[:2].upper() }}";
         
         let history = [];
         let hasStarted = false;
@@ -239,8 +237,8 @@ UI_TEMPLATE = """
             const msgDiv = document.createElement('div');
             msgDiv.className = `w-full max-w-4xl mx-auto flex gap-4 ${isUser ? 'flex-row-reverse' : ''} mb-8 animate-fade-in`;
             const avatar = isUser ? 
-                `<img src="${userPicture}" class="w-10 h-10 rounded-full border-2 border-[#2d324d] shadow-lg flex-shrink-0 mt-1">` : 
-                `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex-shrink-0 flex items-center justify-center text-white mt-1 shadow-lg shadow-blue-500/30 border border-blue-400/50"><i class="fa-solid fa-bolt"></i></div>`;
+                `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex-shrink-0 flex items-center justify-center text-white font-bold mt-1 shadow-lg shadow-blue-500/30 border-2 border-[#2d324d]">${userInitials}</div>` : 
+                `<div class="w-10 h-10 rounded-full bg-[#1a1d2d] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 shadow-lg shadow-black/50 border border-[#2d324d]"><i class="fa-solid fa-bolt"></i></div>`;
             const bubbleClass = isUser ? 'bg-blue-600/20 border border-blue-500/30 px-6 py-4 rounded-2xl rounded-tl-sm text-gray-100 max-w-[85%] shadow-md' : 'text-gray-200 prose prose-invert max-w-full leading-relaxed w-full bg-[#1a1d2d] p-6 rounded-2xl rounded-tr-sm border border-[#2d324d] shadow-lg';
 
             msgDiv.innerHTML = `${avatar}<div class="${bubbleClass} break-words overflow-hidden">${attachmentHtml}${finalContent}</div>`;
@@ -254,7 +252,7 @@ UI_TEMPLATE = """
             const msgDiv = document.createElement('div');
             msgDiv.id = 'typingIndicator';
             msgDiv.className = `w-full max-w-4xl mx-auto flex gap-4 mb-8`;
-            msgDiv.innerHTML = `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex-shrink-0 flex items-center justify-center text-white mt-1 shadow-lg shadow-blue-500/30 border border-blue-400/50"><i class="fa-solid fa-bolt"></i></div><div class="flex items-center gap-1 h-10 px-4 bg-[#1a1d2d] rounded-2xl rounded-tr-sm border border-[#2d324d]"><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div></div>`;
+            msgDiv.innerHTML = `<div class="w-10 h-10 rounded-full bg-[#1a1d2d] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 shadow-lg shadow-black/50 border border-[#2d324d]"><i class="fa-solid fa-bolt"></i></div><div class="flex items-center gap-1 h-10 px-4 bg-[#1a1d2d] rounded-2xl rounded-tr-sm border border-[#2d324d]"><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div></div>`;
             chatBox.appendChild(msgDiv);
             scrollToBottom();
         }
@@ -303,13 +301,13 @@ UI_TEMPLATE = """
 
         function clearMemory() {
             history = []; hasStarted = false; removeFile();
-            chatBox.innerHTML = `<div class="text-center my-12 animate-fade-in"><img src="${userPicture}" class="w-24 h-24 mx-auto rounded-full border-4 border-[#2d324d] shadow-2xl mb-4"><h2 class="text-3xl font-bold text-gray-100">تم مسح الذاكرة</h2><p class="text-gray-400 mt-2 text-sm">Zeno مستعد لموضوع جديد تماماً.</p></div>`;
+            chatBox.innerHTML = `<div class="text-center my-12 animate-fade-in"><div class="w-24 h-24 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-4xl font-bold border-4 border-[#2d324d] shadow-2xl mb-4">${userInitials}</div><h2 class="text-3xl font-bold text-gray-100">تم مسح الذاكرة</h2><p class="text-gray-400 mt-2 text-sm">Zeno مستعد لموضوع جديد تماماً يا ${currentUser}.</p></div>`;
         }
 
         function exportChat() {
             if(history.length === 0) return alert('لا يوجد محادثة لتصديرها!');
             let textData = "Zeno AI - Enterprise Chat Export\\n================================\\n\\n";
-            history.forEach(msg => { textData += `[${msg.role === 'user' ? userName : "Zeno"}]:\\n${msg.content}\\n\\n-------------------\\n\\n`; });
+            history.forEach(msg => { textData += `[${msg.role === 'user' ? currentUser : "Zeno"}]:\\n${msg.content}\\n\\n-------------------\\n\\n`; });
             const blob = new Blob([textData], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a'); a.href = url; a.download = `Zeno_Session_${new Date().getTime()}.txt`;
@@ -324,62 +322,30 @@ UI_TEMPLATE = """
 </html>
 """
 
+# 4. مسارات الدخول والتحكم
 @app.route("/")
 def home():
-    return render_template_string(UI_TEMPLATE)
+    username = session.get('username')
+    return render_template_string(UI_TEMPLATE, username=username)
 
-@app.route("/login")
+@app.route("/login", methods=["POST"])
 def login():
-    if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
-        return "يجب إعداد GOOGLE_CLIENT_ID و REDIRECT_URI في Vercel أولاً.", 500
-        
-    auth_req_url = f"{AUTH_URL}?client_id={GOOGLE_CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=openid%20email%20profile&access_type=offline"
-    return redirect(auth_req_url)
-
-@app.route("/callback")
-def callback():
-    code = request.args.get("code")
-    if not code:
-        return redirect(url_for("home"))
-        
-    token_data = {
-        "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        "grant_type": "authorization_code"
-    }
-    
-    token_res = requests.post(TOKEN_URL, data=token_data)
-    if not token_res.ok:
-        logger.error(f"فشل الحصول على التوكن: {token_res.text}")
-        return "حدث خطأ أثناء مصادقة جوجل.", 400
-        
-    access_token = token_res.json().get("access_token")
-    headers = {"Authorization": f"Bearer {access_token}"}
-    user_info_res = requests.get(USER_INFO_URL, headers=headers)
-    
-    if user_info_res.ok:
-        user_info = user_info_res.json()
-        session['user'] = {
-            'name': user_info.get('name', 'مستخدم'),
-            'email': user_info.get('email', ''),
-            'picture': user_info.get('picture', 'https://www.gravatar.com/avatar/?d=mp')
-        }
-        logger.info(f"تم تسجيل الدخول بنجاح للمستخدم: {session['user']['email']}")
-        
-    return redirect(url_for("home"))
+    username = request.form.get("username", "").strip()
+    if username:
+        session['username'] = username
+        logger.info(f"تم تسجيل الدخول محلياً للمستخدم: {username}")
+    return redirect(url_for('home'))
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("home"))
+    return redirect(url_for('home'))
 
 @app.post("/chat")
 def chat():
-    user_data = session.get('user')
-    if not user_data:
-        return jsonify({"error": "يرجى تسجيل الدخول بحساب جوجل أولاً."}), 401
+    username = session.get('username')
+    if not username:
+        return jsonify({"error": "يرجى تسجيل الدخول أولاً."}), 401
 
     try:
         data = request.get_json(silent=True) or {}
@@ -413,7 +379,7 @@ def chat():
             
         contents.append(types.Content(role="user", parts=user_parts))
         
-        dynamic_instruction = get_dynamic_instruction(user_data['name'], user_data['email'])
+        dynamic_instruction = get_dynamic_instruction(username)
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -439,7 +405,7 @@ def chat():
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(json.str(e))}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
