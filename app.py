@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from google import genai
