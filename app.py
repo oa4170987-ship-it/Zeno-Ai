@@ -14,8 +14,8 @@ app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026")
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 logger = logging.getLogger("ZenoSystem")
 
-# 3. إعدادات الموديل (1.5-flash للسرعة القصوى)
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+# 3. إعدادات الموديل (3.8-flash للسرعة القصوى)
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_HISTORY = 40
 
 def get_dynamic_instruction(username):
