@@ -1,14 +1,29 @@
 import os
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
+import logging
+from flask import Flask, render_template_string, request, jsonify
 from google import genai
 from google.genai import types
 
+# ==========================================
+# 1. إعدادات النظام وتسجيل الأحداث
+# ==========================================
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
+logger = logging.getLogger("ZenoSystem")
+
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "omar_zeno_super_secret_key_2026")
 
-MODEL = "gemini-3.6-flash"
+# استخدام موديل مستقر لتجنب مشاكل الضغط 503
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MAX_HISTORY = 40
 
-SYSTEM_INSTRUCTION = """أنت Zeno، نظام ذكاء اصطناعي خارق، سريع للغاية، ودقيق. تم تطويرك وبرمجتك بواسطة المطور العبقري عمر (Omar). ساعده بكل قوة واحترافية."""
+# تحديث ذكاء زينو (System Instruction)
+SYSTEM_INSTRUCTION = """أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
+تم إنشاؤك وتطويرك حصرياً بواسطة المطور العبقري "عمر" (Omar).
+تعليماتك الأساسية:
+1. قدم إجابات عبقرية، دقيقة، ومباشرة بدون مقدمات مملة.
+2. إذا طُلب منك كود برمجي، اكتبه بأفضل الممارسات الهندسية (Clean Code) مع تعليقات توضيحية.
+3. استخدم تنسيق Markdown باحترافية (جداول، قوائم، أكواد بارزة).
+4. أنت لست مجرد روبوت، أنت المساعد الشخصي الخارق لعمر، تحدث معه بثقة واحترافية عالية."""
 
 def get_client():
     api_key = os.getenv("GEMINI_API_KEY")
@@ -16,135 +31,151 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
+# ==========================================
+# 2. الواجهة الاحترافية (Premium Dark Mode UI)
+# ==========================================
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zeno AI - Developed by Omar</title>
+    <title>Zeno AI | Omar</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-gray-950 text-gray-100 h-screen flex flex-col justify-between selection:bg-blue-600 selection:text-white">
-    
-    {% if not session.get('logged_in') %}
-    <div class="flex-1 flex items-center justify-center p-4">
-        <div class="bg-gray-900 border border-gray-800 p-8 rounded-2xl max-w-md w-full shadow-2xl text-center space-y-6">
-            <div class="w-16 h-16 bg-blue-600/20 text-blue-400 rounded-2xl flex items-center justify-center mx-auto text-2xl border border-blue-500/30">
-                <i class="fa-solid fa-atom animate-spin"></i>
-            </div>
-            <div>
-                <h1 class="text-2xl font-bold tracking-tight">تسجيل دخول Zeno AI</h1>
-                <p class="text-xs text-gray-400 mt-1">مطور النظام: <span class="text-blue-400 font-semibold">عمر</span></p>
-            </div>
-            <form method="POST" action="/login" class="space-y-4">
-                <input type="password" name="password" placeholder="أدخل كلمة المرور (omar2026)..." required class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 text-center">
-                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-bold text-sm transition shadow-lg shadow-blue-600/20">دخول للنظام الخارق</button>
-            </form>
-        </div>
-    </div>
-    {% else %}
-    <header class="bg-gray-900/80 backdrop-blur-md border-b border-gray-800 p-4 flex justify-between items-center z-10">
-        <div class="flex items-center gap-3">
-            <h1 class="font-bold text-lg text-blue-400 flex items-center gap-2">
-                <i class="fa-solid fa-atom"></i> Zeno AI
-            </h1>
-            <span class="text-xs text-gray-400 bg-gray-800/60 px-2.5 py-1 rounded-full border border-gray-700">المطور: <strong class="text-blue-400">عمر</strong></span>
-        </div>
-        <div class="flex items-center gap-3">
-            <span class="text-xs text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-full font-mono">gemini-3.6-flash</span>
-            <a href="/logout" class="text-xs text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 px-3 py-1 rounded-full transition"><i class="fa-solid fa-power-off"></i> خروج</a>
-        </div>
-    </header>
-
-    <main id="chatBox" class="flex-1 overflow-y-auto p-4 space-y-4 max-w-4xl w-full mx-auto">
-        <div class="bg-gray-900/90 border border-gray-800 p-4 rounded-2xl text-sm shadow-md max-w-xl">
-            أهلاً بك يا عمر في النظام الخارق السحابي! الذاكرة مفعلة والموديل يعمل بكفاءة تامة. كيف أساعدك اليوم؟ ⚡
-        </div>
-    </main>
-
-    <footer class="bg-gray-900/80 backdrop-blur-md border-t border-gray-800 p-4">
-        <div class="max-w-4xl mx-auto flex gap-2">
-            <input type="text" id="userInput" placeholder="اطرح سؤالك الخارق هنا..." class="flex-1 bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500">
-            <button onclick="sendMessage()" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl text-sm font-bold transition shadow-lg shadow-blue-600/20"><i class="fa-solid fa-paper-plane"></i></button>
-        </div>
-    </footer>
-
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
     <script>
-        const chatBox = document.getElementById('chatBox');
-        const userInput = document.getElementById('userInput');
-        let history = [];
-
-        userInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
-
-        async function sendMessage() {
-            const text = userInput.value.trim();
-            if (!text) return;
-            userInput.value = '';
-            
-            chatBox.innerHTML += `<div class="bg-blue-600 text-white p-3.5 rounded-2xl text-sm max-w-[80%] mr-auto shadow-md">${text}</div>`;
-            chatBox.scrollTop = chatBox.scrollHeight;
-
-            try {
-                const res = await fetch('/chat', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ message: text, history: history })
-                });
-                const data = await res.json();
-                chatBox.innerHTML += `<div class="bg-gray-900 border border-gray-800 p-3.5 rounded-2xl text-sm max-w-[80%] shadow-md">${data.response}</div>`;
-                chatBox.scrollTop = chatBox.scrollHeight;
-                
-                history.push({role: 'user', content: text}, {role: 'assistant', content: data.response});
-                if(history.length > 20) history = history.slice(-20);
-            } catch (err) {
-                chatBox.innerHTML += `<div class="bg-red-900/50 border border-red-700 p-3.5 rounded-2xl text-sm">حدث خطأ في الاتصال بالشبكة.</div>`;
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        chatbg: '#212121',
+                        sidebarbg: '#171717',
+                        msgbg: '#2f2f2f',
+                        userbg: '#3b82f6'
+                    }
+                }
             }
         }
     </script>
-    {% endif %}
-</body>
-</html>
-"""
-
-@app.route("/")
-def home():
-    return render_template_string(UI_TEMPLATE)
-
-@app.route("/login", methods=["POST"])
-def login():
-    password = request.form.get("password", "")
-    if password == "omar2026":
-        session['logged_in'] = True
-    return redirect(url_for('home'))
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for('home'))
-
-@app.post("/chat")
-def chat():
-    if not session.get('logged_in'):
-        return jsonify({"response": "غير مسموح بالوصول، يرجى تسجيل الدخول."}), 403
-    try:
-        data = request.get_json() or {}
-        msg = data.get("message", "").strip()
-        history = data.get("history", [])
+    <style>
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: #212121; color: #ececec; margin: 0; height: 100vh; overflow: hidden; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #424242; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #525252; }
         
-        client = get_client()
-        contents = []
-        for h in history:
-            role = "model" if h.get("role") == "assistant" else "user"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h.get("content", ""))]))
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg)]))
+        .prose pre { background-color: #0d0d0d !important; border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; overflow-x: auto; direction: ltr; border: 1px solid #333; }
+        .prose code { font-family: 'Consolas', monospace; font-size: 0.9em; }
+        .prose p { margin-bottom: 1rem; line-height: 1.7; }
+        .prose strong { color: #fff; }
+        
+        .typing-dot { animation: typing 1.4s infinite ease-in-out both; }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        
+        .glass-input { background: rgba(47, 47, 47, 0.8); backdrop-filter: blur(10px); border: 1px solid #424242; }
+    </style>
+</head>
+<body class="flex">
 
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-        )
-        return jsonify({"response": resp.text.strip()})
-    except Exception as e:
-        return jsonify({"response": f"خطأ سحابي: {str(e)}"}), 500
+    <!-- القائمة الجانبية -->
+    <aside class="w-64 bg-sidebarbg hidden md:flex flex-col border-l border-gray-800 h-full">
+        <div class="p-4">
+            <button onclick="clearMemory()" class="w-full flex items-center justify-between bg-transparent hover:bg-gray-800 text-gray-200 border border-gray-700 px-4 py-3 rounded-lg transition text-sm">
+                <span class="flex items-center gap-3"><i class="fa-solid fa-plus"></i> محادثة جديدة</span>
+                <i class="fa-solid fa-pen-to-square text-gray-400"></i>
+            </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-2">
+            <p class="text-xs text-gray-500 font-semibold mb-3 px-2">الإعدادات والأدوات</p>
+            <button onclick="exportChat()" class="w-full flex items-center gap-3 hover:bg-gray-800 text-gray-300 px-3 py-2.5 rounded-lg transition text-sm">
+                <i class="fa-solid fa-download w-5 text-center"></i> حفظ المحادثة
+            </button>
+            <div class="w-full flex items-center gap-3 text-gray-300 px-3 py-2.5 rounded-lg text-sm opacity-50 cursor-not-allowed">
+                <i class="fa-solid fa-image w-5 text-center"></i> تحليل الصور (قريباً)
+            </div>
+        </div>
+        <div class="p-4 border-t border-gray-800">
+            <div class="flex items-center gap-3 text-sm text-gray-200 font-semibold">
+                <div class="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center text-white">OM</div>
+                المطور عمر
+            </div>
+        </div>
+    </aside>
+
+    <!-- منطقة الشات -->
+    <main class="flex-1 flex flex-col h-full relative bg-chatbg">
+        <!-- هيدر الموبايل -->
+        <header class="md:hidden bg-sidebarbg border-b border-gray-800 p-4 flex justify-between items-center text-gray-200">
+            <h1 class="font-bold text-lg flex items-center gap-2"><i class="fa-solid fa-atom text-blue-500"></i> Zeno AI</h1>
+            <button onclick="clearMemory()"><i class="fa-solid fa-pen-to-square"></i></button>
+        </header>
+
+        <!-- صندوق الرسائل -->
+        <div id="chatBox" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 pb-40 scroll-smooth flex flex-col items-center">
+            
+            <div class="text-center my-10 animate-fade-in">
+                <div class="w-20 h-20 mx-auto bg-msgbg rounded-full flex items-center justify-center text-4xl mb-4 border border-gray-700 shadow-xl">
+                    <i class="fa-solid fa-atom text-blue-500"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-100">كيف يمكنني مساعدتك اليوم؟</h2>
+                <p class="text-gray-400 mt-2 text-sm">Zeno Advanced AI - V 3.0</p>
+            </div>
+
+        </div>
+
+        <!-- منطقة الإدخال -->
+        <div class="absolute bottom-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-t from-chatbg via-chatbg to-transparent">
+            <div class="max-w-3xl mx-auto relative glass-input rounded-2xl flex items-end p-2 shadow-2xl focus-within:ring-1 focus-within:ring-gray-500 transition">
+                <textarea id="userInput" rows="1" placeholder="اسأل زينو عن أي شيء..." class="flex-1 bg-transparent border-none px-4 py-3 text-base focus:outline-none resize-none max-h-48 text-gray-100 placeholder-gray-400"></textarea>
+                <button onclick="sendMessage()" id="sendBtn" class="bg-white text-black hover:bg-gray-200 w-10 h-10 rounded-xl flex items-center justify-center transition flex-shrink-0 mb-1 mr-2 disabled:opacity-50">
+                    <i class="fa-solid fa-arrow-up"></i>
+                </button>
+            </div>
+            <p class="text-center text-xs text-gray-500 mt-3">زينو يمكن أن يخطئ. يرجى مراجعة المعلومات الهامة.</p>
+        </div>
+    </main>
+
+    <script>
+        marked.setOptions({
+            highlight: function(code, lang) {
+                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+                return hljs.highlight(code, { language }).value;
+            },
+            breaks: true
+        });
+
+        const chatBox = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        let history = [];
+        let hasStarted = false;
+
+        userInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            if(this.value.trim() === '') this.style.height = 'auto';
+        });
+
+        userInput.addEventListener('keydown', e => { 
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+        });
+
+        function clearWelcomeMessage() {
+            if (!hasStarted) {
+                chatBox.innerHTML = '';
+                hasStarted = true;
+            }
+        }
+
+        function appendMessage(role, content) {
+            clearWelcomeMessage();
+            const isUser = role === 'user';
+            const finalContent = isUser ? escapeHTML(content) : marked.parse(content);
+            
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `w-full max-w-3xl mx
