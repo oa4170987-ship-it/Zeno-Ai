@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(
 logger = logging.getLogger("ZenoSystem")
 
 # 3. إعدادات الموديل (تم التحديث لـ 3.8 بناءً على رسالة الخطأ)
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 MAX_HISTORY = 40
 
 SYSTEM_INSTRUCTION = """أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
