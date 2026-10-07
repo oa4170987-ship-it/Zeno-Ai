@@ -9,14 +9,47 @@ from google.genai import types
 
 # 1. إعدادات التطبيق الأساسية
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026_local")
+app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026_rotation")
 
 # 2. تسجيل الأحداث وإعدادات الموديل
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
-logger = logging.getLogger("ZenoLocal")
+logger = logging.getLogger("ZenoRotation")
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_HISTORY = 40
+
+# دمج وجلب كل المفاتيح المتاحة من خزنة Vercel تلقائياً
+def get_all_api_keys():
+    keys = []
+    # فحص المفتاح الرئيسي المفرد
+    main_key = os.getenv("GEMINI_API_KEY")
+    if main_key:
+        keys.append(main_key)
+    
+    # فحص المفاتيح المتعددة الرقمية (1 إلى 10)
+    for i in range(1, 11):
+        k = os.getenv(f"GEMINI_API_KEY_{i}")
+        if k and k not in keys:
+            keys.append(k)
+            
+    if not keys:
+        raise RuntimeError("لا توجد أي مفاتيح API مسجلة في متغيرات البيئة لـ Vercel!")
+    return keys
+
+# متغير عام لتتبع المفتاح الحالي المستخدم
+current_key_index = 0
+
+def get_next_client():
+    global current_key_index
+    keys = get_all_api_keys()
+    api_key = keys[current_key_index % len(keys)]
+    return genai.Client(api_key=api_key), current_key_index
+
+def rotate_key():
+    global current_key_index
+    keys = get_all_api_keys()
+    current_key_index = (current_key_index + 1) % len(keys)
+    logger.warning(جاري التبديل تلقائياً للمفتاح رقم: {current_key_index + 1})
 
 def get_dynamic_instruction(username):
     return f"""أنت Zeno، ذكاء اصطناعي فائق التطور، وأقوى مساعد برمجي وتقني. 
@@ -28,12 +61,6 @@ def get_dynamic_instruction(username):
 3. إذا طُلب منك كود برمجي، اكتبه بأفضل الممارسات الهندسية (Clean Code).
 4. استخدم تنسيق Markdown باحترافية عالية.
 5. استغل قدراتك القصوى في تحليل الملفات والصور المعقدة إذا تم إرفاقها."""
-
-def get_client():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
-    return genai.Client(api_key=api_key)
 
 # 3. واجهة المستخدم المتجاوبة الكاملة
 UI_TEMPLATE = """
@@ -150,7 +177,7 @@ UI_TEMPLATE = """
                     {{ username[:2].upper() }}
                 </div>
                 <h2 class="text-2xl sm:text-3xl font-bold text-gray-100">أهلاً بك، {{ username.split(' ')[0] }}</h2>
-                <p class="text-gray-400 mt-2 text-xs sm:text-sm">Zeno جاهز لتنفيذ أوامرك بأقصى ذكاء وسرعة.</p>
+                <p class="text-gray-400 mt-2 text-xs sm:text-sm">Zeno جاهز لتنفيذ أوامرك بأقصى ذكاء وسرعة بلا توقف.</p>
             </div>
         </div>
 
@@ -337,7 +364,7 @@ UI_TEMPLATE = """
 </html>
 """
 
-# 4. مسارات الفلاسك الخلفية
+# 4. مسارات الفلاسك الخلفية مع نظام التبديل الذكي
 @app.route("/")
 def home():
     username = session.get('username')
@@ -369,9 +396,7 @@ def chat():
         file_data = data.get("file_data")
         mime_type = data.get("mime_type")
         
-        client = get_client()
         contents = []
-        
         for h in client_history[-MAX_HISTORY:]:
             role = "model" if h.get("role") == "assistant" else "user"
             content = str(h.get("content", "")).strip()
@@ -393,11 +418,14 @@ def chat():
             return jsonify({"error": "الرسالة فارغة."}), 400
             
         contents.append(types.Content(role="user", parts=user_parts))
-        
         dynamic_instruction = get_dynamic_instruction(username)
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        # محاولة إرسال الطلب مع التبديل التلقائي بين المفاتيح عند حدوث خطأ استنفاد الحصة (429)
+        total_keys = len(get_all_api_keys())
+        max_attempts = total_keys + 1
+        
+        for attempt in range(max_attempts):
+            client, key_idx = get_next_client()
             try:
                 resp = client.models.generate_content(
                     model=MODEL,
@@ -411,12 +439,17 @@ def chat():
                 return jsonify({"response": resp.text.strip() if resp.text else "عذراً، لم أتمكن من تكوين إجابة."})
             except Exception as api_err:
                 error_str = str(api_err)
-                if "503" in error_str and attempt < max_retries - 1:
-                    logger.warning(f"ضغط على جوجل. إعادة المحاولة رقم {attempt + 1}...")
-                    time.sleep(2)
+                # إذا كان الخطأ بسبب نفاد الحصة (429) أو ضغط السيرفر (503)، نقوم بتبديل المفتاح فوراً
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str:
+                    logger.warning(f"المفتاح رقم {key_idx + 1} استنفد حصته أو واجه ضغطاً. جاري التبديل للمفتاح التالي...")
+                    rotate_key()
+                    time.sleep(1)
                     continue
-                logger.error(f"Error: {error_str}")
-                return jsonify({"error": error_str}), 500
+                else:
+                    logger.error(f"Error: {error_str}")
+                    return jsonify({"error": error_str}), 500
+                    
+        return jsonify({"error": "عذراً، تم استنفاد جميع المفاتيح المتاحة حالياً. يرجى إضافة مفاتيح إضافية."}), 500
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
