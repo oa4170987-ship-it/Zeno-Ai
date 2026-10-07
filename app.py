@@ -1,32 +1,29 @@
 # -*- coding: utf-8 -*-
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
+app = Flask(__name__)
+
 import os
 import time
 import logging
 import base64
 import requests
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from google import genai
 from google.genai import types
 
-# 1. إعدادات التطبيق الأساسية
-app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "zeno_super_secret_key_abu_saeed_2026_enterprise")
 
-# 2. إعدادات جوجل لتسجيل الدخول (Google OAuth 2.0)
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI") # سيتم ضبطه في Vercel مثل: https://your-app.vercel.app/callback
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USER_INFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
-# 3. تسجيل الأحداث وإعدادات الموديل
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 logger = logging.getLogger("ZenoEnterprise")
 
-# استخدمنا الموديل الذي تفضله
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_HISTORY = 40
 
 def get_dynamic_instruction(user_name, user_email):
@@ -46,7 +43,6 @@ def get_client():
         raise RuntimeError("GEMINI_API_KEY غير موجود في إعدادات Vercel.")
     return genai.Client(api_key=api_key)
 
-# 4. واجهة المستخدم الفاخرة (Enterprise UI)
 UI_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -83,7 +79,6 @@ UI_TEMPLATE = """
 <body class="flex">
 
     {% if not session.get('user') %}
-    <!-- شاشة تسجيل الدخول بـ Google -->
     <div class="flex-1 flex items-center justify-center p-4 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] relative w-full">
         <div class="absolute inset-0 bg-blue-900/10 backdrop-blur-md z-0"></div>
         <div class="bg-[#090a0f]/90 border border-[#2d324d] p-10 rounded-3xl max-w-md w-full shadow-2xl text-center space-y-8 z-10 backdrop-blur-2xl">
@@ -100,12 +95,9 @@ UI_TEMPLATE = """
                 <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" class="w-6 h-6">
                 المتابعة باستخدام Google
             </a>
-            
-            <p class="text-[10px] text-gray-500 mt-4">النظام آمن 100% ولا يقوم بحفظ بيانات المرور الخاصة بك.</p>
         </div>
     </div>
     {% else %}
-    <!-- واجهة النظام للمستخدم المسجل -->
     <aside class="w-72 bg-sidebarbg hidden md:flex flex-col border-l border-[#2d324d] h-full shadow-2xl z-20">
         <div class="p-6 border-b border-[#2d324d]">
             <h1 class="font-black text-2xl text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500 flex items-center gap-3">
@@ -122,7 +114,6 @@ UI_TEMPLATE = """
             </button>
         </div>
         
-        <!-- بيانات المستخدم من جوجل -->
         <div class="p-4 border-t border-[#2d324d] bg-[#0d0e15]">
             <div class="flex items-center gap-3">
                 <img src="{{ session.user.picture }}" alt="Profile" class="w-10 h-10 rounded-full border-2 border-blue-500 shadow-md">
@@ -175,7 +166,6 @@ UI_TEMPLATE = """
                     <i class="fa-solid fa-paper-plane"></i>
                 </button>
             </div>
-            <p class="text-center text-[10px] text-gray-600 mt-3 font-mono">Zeno Enterprise Edition - Secured by Google OAuth</p>
         </div>
     </main>
 
@@ -334,14 +324,12 @@ UI_TEMPLATE = """
 </html>
 """
 
-# 5. مسارات تسجيل الدخول بجوجل (Google OAuth Routes)
 @app.route("/")
 def home():
     return render_template_string(UI_TEMPLATE)
 
 @app.route("/login")
 def login():
-    # إعادة التوجيه لصفحة تسجيل الدخول الخاصة بجوجل
     if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
         return "يجب إعداد GOOGLE_CLIENT_ID و REDIRECT_URI في Vercel أولاً.", 500
         
@@ -350,7 +338,6 @@ def login():
 
 @app.route("/callback")
 def callback():
-    # استلام الكود من جوجل وتبديله بمعلومات المستخدم
     code = request.args.get("code")
     if not code:
         return redirect(url_for("home"))
@@ -388,7 +375,6 @@ def logout():
     session.clear()
     return redirect(url_for("home"))
 
-# 6. مسار الشات الذكي (Chat Route)
 @app.post("/chat")
 def chat():
     user_data = session.get('user')
@@ -406,4 +392,54 @@ def chat():
         contents = []
         
         for h in client_history[-MAX_HISTORY:]:
-            role
+            role = "model" if h.get("role") == "assistant" else "user"
+            content = str(h.get("content", "")).strip()
+            if content:
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
+                
+        user_parts = []
+        if file_data and mime_type:
+            try:
+                decoded_file = base64.b64decode(file_data)
+                user_parts.append(types.Part.from_bytes(data=decoded_file, mime_type=mime_type))
+            except Exception as e:
+                logger.error(f"فشل فك التشفير: {str(e)}")
+        
+        if msg:
+            user_parts.append(types.Part.from_text(text=msg))
+            
+        if not user_parts:
+            return jsonify({"error": "الرسالة فارغة."}), 400
+            
+        contents.append(types.Content(role="user", parts=user_parts))
+        
+        dynamic_instruction = get_dynamic_instruction(user_data['name'], user_data['email'])
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = client.models.generate_content(
+                    model=MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=dynamic_instruction,
+                        temperature=0.7,
+                        max_output_tokens=8192,
+                    )
+                )
+                return jsonify({"response": resp.text.strip() if resp.text else "عذراً، لم أتمكن من تكوين إجابة."})
+            except Exception as api_err:
+                error_str = str(api_err)
+                if "503" in error_str and attempt < max_retries - 1:
+                    logger.warning(f"ضغط على جوجل. إعادة المحاولة رقم {attempt + 1}...")
+                    time.sleep(2)
+                    continue
+                logger.error(f"Error: {error_str}")
+                return jsonify({"error": error_str}), 500
+
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
