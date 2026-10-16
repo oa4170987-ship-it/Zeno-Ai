@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(
 logger = logging.getLogger("ZenoArgonEngine")
 
 # استخدام أسرع وأذكى نموذج فلاش متاح افتراضياً مع إمكانية التخصيص من البيئة
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-4-argon")
 MAX_HISTORY = 40
 
 def get_all_api_keys():
