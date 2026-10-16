@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for, Response, stream_with_context
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 import os
-import time
 import logging
 import base64
 from google import genai
@@ -11,54 +10,57 @@ app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "zeno_argon_secret_key_abu_saeed_2026")
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
-logger = logging.getLogger("ArgonEngine")
+logger = logging.getLogger("ArgonTurbo")
 
-# ضبط النموذج على gemini-3.8-flash مع حماية تلقائية من الأسماء القديمة
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 if MODEL in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-1.5-flash", "gemini-2.0-flash"]:
     MODEL = "gemini-3.8-flash"
 
-MAX_HISTORY = 40
+MAX_HISTORY = 14  # تقليل حجم الحزمة لسرعة استجابة فائقة
+
+# تخزين المفاتيح والـ Clients في الذاكرة لمنع بطء إعادة إنشاء الاتصال في كل رسالة
+_API_KEYS = None
+_CLIENTS_CACHE = {}
+current_key_index = 0
 
 def get_all_api_keys():
+    global _API_KEYS
+    if _API_KEYS is not None:
+        return _API_KEYS
     keys = []
     main_key = os.getenv("GEMINI_API_KEY")
     if main_key:
         keys.append(main_key.strip())
-    
     for i in range(1, 11):
         k = os.getenv(f"GEMINI_API_KEY_{i}")
         if k and k.strip() not in keys:
             keys.append(k.strip())
-            
     if not keys:
         raise RuntimeError("لا توجد أي مفاتيح API مسجلة في متغيرات البيئة لـ Vercel!")
-    return keys
-
-current_key_index = 0
+    _API_KEYS = keys
+    return _API_KEYS
 
 def get_next_client():
     global current_key_index
     keys = get_all_api_keys()
-    api_key = keys[current_key_index % len(keys)]
-    return genai.Client(api_key=api_key), current_key_index
+    idx = current_key_index % len(keys)
+    api_key = keys[idx]
+    if api_key not in _CLIENTS_CACHE:
+        _CLIENTS_CACHE[api_key] = genai.Client(api_key=api_key)
+    return _CLIENTS_CACHE[api_key], idx
 
 def rotate_key():
     global current_key_index
     keys = get_all_api_keys()
     current_key_index = (current_key_index + 1) % len(keys)
-    logger.warning(f"جاري التبديل الفوري للمفتاح رقم: {current_key_index + 1}")
 
 def get_dynamic_instruction(username):
-    return f"""أنت Argon (نواة Zeno AI الخارقة)، أقوى وأسرع نظام ذكاء اصطناعي هندسي وتقني.
-أنت تتحدث الآن مع: "{username}".
-تم تطويرك وهندسة نظامك بواسطة المطور العبقري "أبو سعيد".
-
-بروتوكول Argon الصارم للذكاء الفائق:
-1. السرعة والدقة: ادخل في صلب الموضوع فوراً بدون مقدمات إنشائية أو حشو، وقدم حلولاً عبقرية ومباشرة.
-2. الهندسة البرمجية (Argon Code Standard): عندما يُطلب منك كود، اكتب الكود كاملاً من أول سطر لآخر سطر (Production-Ready) بدون أي اختصارات مثل (أكمل الكود هنا).
-3. التفكير التحليلي: حلل المشاكل المعقدة والملفات المرفقة بدقة متناهية، ورتب إجابتك بتنسيق Markdown احترافي.
-4. خاطب "{username}" دائماً بأسلوب احترافي يليق بمستوى نظام Argon."""
+    return f"""أنت Argon (نواة Zeno AI الخارقة)، أسرع وأذكى نظام ذكاء اصطناعي تقني وبرمجي، طورك المهندس "أبو سعيد".
+المستخدم الحالي: "{username}".
+قواعد السرعة والذكاء:
+1. ادخل في الإجابة فوراً بدون أي مقدمات أو ترحيب طويل.
+2. اكتب أكواداً كاملة ونظيفة (Production-Ready) بدون اختصار.
+3. استخدم تنسيق Markdown مرتب ومختصر ومركز."""
 
 UI_TEMPLATE = """
 <!DOCTYPE html>
@@ -66,7 +68,7 @@ UI_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Zeno AI | Argon Edition</title>
+    <title>Zeno AI | Argon Turbo</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -86,12 +88,12 @@ UI_TEMPLATE = """
         .prose code { font-family: 'Consolas', monospace; font-size: 0.85em; }
         .prose p { margin-bottom: 0.5rem; }
         .prose p:last-child { margin-bottom: 0; }
-        .typing-dot { animation: typing 1.1s infinite ease-in-out both; }
+        .typing-dot { animation: typing 0.9s infinite ease-in-out both; }
         .typing-dot:nth-child(1) { animation-delay: -0.32s; }
         .typing-dot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-        .glass-input { background: rgba(18, 21, 33, 0.96); backdrop-filter: blur(16px); border: 1px solid #262c42; box-shadow: 0 8px 32px rgba(0,0,0,0.65); }
-        .copy-btn { position: absolute; top: 8px; right: 8px; background: #161929; color: #9ca3af; border: 1px solid #2b324d; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: 0.2s; }
+        .glass-input { background: rgba(18, 21, 33, 0.96); backdrop-filter: blur(12px); border: 1px solid #262c42; box-shadow: 0 8px 32px rgba(0,0,0,0.65); }
+        .copy-btn { position: absolute; top: 8px; right: 8px; background: #161929; color: #9ca3af; border: 1px solid #2b324d; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: 0.15s; }
         .copy-btn:hover { background: #2563eb; color: #fff; border-color: #3b82f6; }
     </style>
 </head>
@@ -105,7 +107,7 @@ UI_TEMPLATE = """
             </div>
             <div>
                 <h1 class="text-2xl sm:text-3xl font-extrabold text-white mb-1">Zeno <span class="text-blue-500">Argon</span></h1>
-                <p class="text-[11px] text-gray-400 font-semibold tracking-widest uppercase mb-3">Turbo Engine by Abu Saeed</p>
+                <p class="text-[11px] text-gray-400 font-semibold tracking-widest uppercase mb-3">Zero-Latency Engine by Abu Saeed</p>
                 <p class="text-xs sm:text-sm text-gray-300">أدخل اسمك لتشغيل محرك Argon فائق السرعة.</p>
             </div>
             <form method="POST" action="/login" class="space-y-4">
@@ -143,7 +145,7 @@ UI_TEMPLATE = """
                 </div>
                 <div class="flex-1 overflow-hidden">
                     <p class="text-xs sm:text-sm font-bold text-gray-200 truncate">{{ username }}</p>
-                    <p class="text-[10px] text-emerald-400 truncate">Argon 3.8 Turbo</p>
+                    <p class="text-[10px] text-emerald-400 truncate">Argon Zero-Delay</p>
                 </div>
                 <a href="/logout" class="text-red-400 hover:text-red-300 bg-red-400/10 p-2 rounded-lg transition" title="خروج">
                     <i class="fa-solid fa-power-off"></i>
@@ -161,7 +163,7 @@ UI_TEMPLATE = """
                     <i class="fa-solid fa-bars text-lg"></i>
                 </button>
                 <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">{{ username[:2].upper() }}</div>
-                <h1 class="font-bold text-sm sm:text-base text-blue-400">Zeno <span class="text-xs text-cyan-400 font-mono">Argon</span></h1>
+                <h1 class="font-bold text-sm sm:text-base text-blue-400">Zeno <span class="text-xs text-cyan-400 font-mono">Argon Turbo</span></h1>
             </div>
             <div class="flex items-center gap-2">
                 <button onclick="clearMemory()" class="text-gray-400 hover:text-white p-2 text-sm" title="محادثة جديدة"><i class="fa-solid fa-pen-to-square"></i></button>
@@ -170,12 +172,12 @@ UI_TEMPLATE = """
         </header>
 
         <div id="chatBox" class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6 pb-8 w-full">
-            <div class="text-center my-10 animate-fade-in px-4">
+            <div class="text-center my-10 px-4">
                 <div class="w-20 h-20 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-3xl font-bold border-4 border-[#262c42] shadow-2xl mb-4">
                     <i class="fa-solid fa-bolt-lightning"></i>
                 </div>
                 <h2 class="text-2xl sm:text-3xl font-bold text-gray-100">أهلاً بك، {{ username.split(' ')[0] }}</h2>
-                <p class="text-gray-400 mt-2 text-xs sm:text-sm">نسخة Argon الخارقة جاهزة للتنفيذ الفوري بأقصى سرعة وذكاء.</p>
+                <p class="text-gray-400 mt-2 text-xs sm:text-sm">محرك Argon Turbo مفعل بدون أي تأخير (Zero Thinking Delay).</p>
             </div>
         </div>
 
@@ -205,13 +207,7 @@ UI_TEMPLATE = """
     </main>
 
     <script>
-        marked.setOptions({
-            highlight: function(code, lang) {
-                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-                return hljs.highlight(code, { language }).value;
-            },
-            breaks: true
-        });
+        marked.setOptions({ breaks: true });
 
         const chatBox = document.getElementById('chatBox');
         const scrollDownBtn = document.getElementById('scrollDownBtn');
@@ -231,27 +227,23 @@ UI_TEMPLATE = """
         let currentFileBase64 = null;
         let currentFileMime = null;
         let currentFileName = null;
-        let autoScrollEnabled = true;
 
         chatBox.addEventListener('scroll', () => {
             const distanceFromBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight;
             if (distanceFromBottom > 120) {
-                autoScrollEnabled = false;
                 scrollDownBtn.classList.remove('hidden');
             } else {
-                autoScrollEnabled = true;
                 scrollDownBtn.classList.add('hidden');
             }
         });
 
-        function scrollToBottom(force = false) {
-            if (force || autoScrollEnabled) {
+        function scrollToBottom() {
+            requestAnimationFrame(() => {
                 chatBox.scrollTop = chatBox.scrollHeight;
-            }
+            });
         }
 
         function forceScrollToBottom() {
-            autoScrollEnabled = true;
             chatBox.scrollTo({ top: chatBox.scrollHeight, behavior: 'smooth' });
             scrollDownBtn.classList.add('hidden');
         }
@@ -311,99 +303,80 @@ UI_TEMPLATE = """
             });
         }
 
-        function appendUserMessage(content, attachmentName = null) {
+        function appendMessage(role, content, attachmentName = null) {
             clearWelcomeMessage();
+            const isUser = role === 'user';
+            const finalContent = isUser ? escapeHTML(content) : marked.parse(content);
             let attachmentHtml = '';
-            if (attachmentName) {
+            if (isUser && attachmentName) {
                 attachmentHtml = `<div class="bg-[#262c42] text-blue-300 text-xs px-3 py-1.5 rounded-lg mb-2 inline-flex items-center font-mono"><i class="fa-solid fa-file-lines ml-2"></i> ${attachmentName}</div><br>`;
             }
             const msgDiv = document.createElement('div');
-            msgDiv.className = `w-full max-w-4xl mx-auto flex gap-3 sm:gap-4 flex-row-reverse mb-6`;
-            msgDiv.innerHTML = `
-                <div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex-shrink-0 flex items-center justify-center text-white font-bold text-xs sm:text-sm mt-1 border border-[#262c42]">${userInitials}</div>
-                <div class="bg-blue-600/20 border border-blue-500/30 px-4 sm:px-5 py-3 rounded-2xl rounded-tl-sm text-gray-100 max-w-[85%] text-sm sm:text-base break-words overflow-hidden">${attachmentHtml}${escapeHTML(content)}</div>
-            `;
+            msgDiv.className = `w-full max-w-4xl mx-auto flex gap-3 sm:gap-4 ${isUser ? 'flex-row-reverse' : ''} mb-6`;
+            const avatar = isUser ? 
+                `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex-shrink-0 flex items-center justify-center text-white font-bold text-xs sm:text-sm mt-1 border border-[#262c42]">${userInitials}</div>` : 
+                `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#121521] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 border border-[#262c42]"><i class="fa-solid fa-bolt-lightning text-xs sm:text-sm"></i></div>`;
+            const bubbleClass = isUser ? 'bg-blue-600/20 border border-blue-500/30 px-4 sm:px-5 py-3 rounded-2xl rounded-tl-sm text-gray-100 max-w-[85%] text-sm sm:text-base' : 'text-gray-200 prose prose-invert max-w-full leading-relaxed w-full bg-[#121521] p-4 sm:p-6 rounded-2xl rounded-tr-sm border border-[#262c42] text-sm sm:text-base';
+
+            msgDiv.innerHTML = `${avatar}<div class="${bubbleClass} break-words overflow-hidden">${attachmentHtml}${finalContent}</div>`;
             chatBox.appendChild(msgDiv);
-            autoScrollEnabled = true;
-            scrollToBottom(true);
+            
+            if(!isUser) {
+                msgDiv.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
+                addCopyButtons(msgDiv);
+            }
+            scrollToBottom();
         }
 
-        function createAssistantPlaceholder() {
+        function showTyping() {
             clearWelcomeMessage();
             const msgDiv = document.createElement('div');
+            msgDiv.id = 'typingIndicator';
             msgDiv.className = `w-full max-w-4xl mx-auto flex gap-3 sm:gap-4 mb-6`;
-            const bubbleId = 'bubble_' + Date.now();
-            msgDiv.innerHTML = `
-                <div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#121521] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 border border-[#262c42]"><i class="fa-solid fa-bolt-lightning text-xs sm:text-sm"></i></div>
-                <div id="${bubbleId}" class="text-gray-200 prose prose-invert max-w-full leading-relaxed w-full bg-[#121521] p-4 sm:p-6 rounded-2xl rounded-tr-sm border border-[#262c42] text-sm sm:text-base break-words overflow-hidden">
-                    <div class="flex items-center gap-1.5 h-6"><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div></div>
-                </div>
-            `;
+            msgDiv.innerHTML = `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#121521] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 border border-[#262c42]"><i class="fa-solid fa-bolt-lightning text-xs sm:text-sm"></i></div><div class="flex items-center gap-1.5 h-10 px-4 bg-[#121521] rounded-2xl rounded-tr-sm border border-[#262c42]"><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div></div>`;
             chatBox.appendChild(msgDiv);
-            scrollToBottom(true);
-            return document.getElementById(bubbleId);
+            scrollToBottom();
         }
+
+        function hideTyping() { const el = document.getElementById('typingIndicator'); if(el) el.remove(); }
 
         async function sendMessage() {
             const text = userInput.value.trim();
             if (!text && !currentFileBase64) return;
             if (sendBtn.disabled) return;
 
-            const sentText = text || "قم بتحليل هذا المرفق بالتفصيل الدقيق.";
+            const sentText = text || "حلل هذا المرفق بدقة.";
             const sentFileName = currentFileName;
             
             userInput.value = ''; userInput.style.height = 'auto'; sendBtn.disabled = true;
-            appendUserMessage(sentText, sentFileName);
+            appendMessage('user', sentText, sentFileName);
+            showTyping();
             
             const payload = { message: sentText, history: history, file_data: currentFileBase64, mime_type: currentFileMime };
             removeFile();
 
-            const assistantBubble = createAssistantPlaceholder();
-            let fullResponse = "";
-
             try {
-                const res = await fetch('/chat_stream', {
+                const res = await fetch('/chat', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
+                hideTyping();
                 
                 if (res.status === 401) { window.location.reload(); return; }
                 
-                if (!res.ok) {
-                    const errData = await res.json();
-                    assistantBubble.innerHTML = marked.parse(`⚠️ **خطأ سحابي:** ${errData.error || 'فشل الاتصال'}`);
-                    scrollToBottom(true);
-                    return;
-                }
-
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder("utf-8");
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    
-                    const chunkText = decoder.decode(value, { stream: true });
-                    fullResponse += chunkText;
-                    
-                    assistantBubble.innerHTML = marked.parse(fullResponse);
-                    scrollToBottom();
-                }
-
-                assistantBubble.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
-                addCopyButtons(assistantBubble);
-                scrollToBottom();
-
-                if (fullResponse.trim()) {
+                const data = await res.json();
+                if(res.ok) {
+                    appendMessage('assistant', data.response);
                     history.push({role: 'user', content: sentFileName ? `[مرفق: ${sentFileName}] ${sentText}` : sentText});
-                    history.push({role: 'assistant', content: fullResponse});
-                    if(history.length > 40) history = history.slice(-40);
+                    history.push({role: 'assistant', content: data.response});
+                    if(history.length > 14) history = history.slice(-14);
+                } else {
+                    appendMessage('assistant', `⚠️ **خطأ سحابي:** ${data.error}`);
                 }
-
             } catch (err) {
-                assistantBubble.innerHTML = marked.parse("⚠️ **خطأ اتصال:** يرجى التحقق من الشبكة.");
-                scrollToBottom();
+                hideTyping();
+                appendMessage('assistant', "⚠️ **خطأ اتصال:** يرجى التحقق من الشبكة.");
             } finally {
                 sendBtn.disabled = false;
                 userInput.focus();
@@ -412,7 +385,7 @@ UI_TEMPLATE = """
 
         function clearMemory() {
             history = []; hasStarted = false; removeFile();
-            chatBox.innerHTML = `<div class="text-center my-12 animate-fade-in"><div class="w-20 h-20 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-3xl font-bold border-4 border-[#262c42] shadow-2xl mb-4"><i class="fa-solid fa-bolt-lightning"></i></div><h2 class="text-2xl font-bold text-gray-100">تم تصفير ذاكرة Argon</h2><p class="text-gray-400 mt-2 text-xs sm:text-sm">المحرك جاهز لجلسة جديدة فائقة السرعة يا ${currentUser}.</p></div>`;
+            chatBox.innerHTML = `<div class="text-center my-12"><div class="w-20 h-20 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-3xl font-bold border-4 border-[#262c42] shadow-2xl mb-4"><i class="fa-solid fa-bolt-lightning"></i></div><h2 class="text-2xl font-bold text-gray-100">تم تصفير ذاكرة Argon</h2><p class="text-gray-400 mt-2 text-xs sm:text-sm">المحرك جاهز لجلسة جديدة فائقة السرعة يا ${currentUser}.</p></div>`;
         }
 
         function exportChat() {
@@ -449,8 +422,8 @@ def logout():
     session.clear()
     return redirect(url_for('home'))
 
-@app.post("/chat_stream")
-def chat_stream():
+@app.post("/chat")
+def chat():
     username = session.get('username')
     if not username:
         return jsonify({"error": "يرجى تسجيل الدخول أولاً."}), 401
@@ -486,40 +459,43 @@ def chat_stream():
         contents.append(types.Content(role="user", parts=user_parts))
         dynamic_instruction = get_dynamic_instruction(username)
 
-        def generate():
-            total_keys = len(get_all_api_keys())
-            max_attempts = total_keys + 1
-            
-            for attempt in range(max_attempts):
-                client, key_idx = get_next_client()
+        total_keys = len(get_all_api_keys())
+        max_attempts = total_keys + 1
+        
+        for attempt in range(max_attempts):
+            client, key_idx = get_next_client()
+            try:
+                # إعدادات Turbo مع إيقاف التفكير الداخلي المخفي للرد اللحظي
                 try:
-                    response_stream = client.models.generate_content_stream(
-                        model=MODEL,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=dynamic_instruction,
-                            temperature=0.4,
-                            max_output_tokens=8192,
-                        )
+                    config = types.GenerateContentConfig(
+                        system_instruction=dynamic_instruction,
+                        temperature=0.3,
+                        max_output_tokens=4096,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0)
                     )
-                    for chunk in response_stream:
-                        if chunk.text:
-                            yield chunk.text
-                    return
-                except Exception as api_err:
-                    error_str = str(api_err)
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str:
-                        rotate_key()
-                        time.sleep(0.2)
-                        continue
-                    else:
-                        logger.error(f"Stream Error: {error_str}")
-                        yield f"\n\n⚠️ **خطأ تقني من الخادم:** `{error_str}`"
-                        return
-                        
-            yield "\n\n⚠️ **تنبيه:** تم استنفاد جميع مفاتيح الـ API المتاحة حالياً."
+                except Exception:
+                    config = types.GenerateContentConfig(
+                        system_instruction=dynamic_instruction,
+                        temperature=0.3,
+                        max_output_tokens=4096,
+                    )
 
-        return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
+                resp = client.models.generate_content(
+                    model=MODEL,
+                    contents=contents,
+                    config=config
+                )
+                return jsonify({"response": resp.text.strip() if resp.text else "تم التنفيذ."})
+            except Exception as api_err:
+                error_str = str(api_err)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str:
+                    rotate_key()
+                    continue
+                else:
+                    logger.error(f"Error: {error_str}")
+                    return jsonify({"error": error_str}), 500
+                    
+        return jsonify({"error": "تم استنفاد جميع المفاتيح المتاحة حالياً."}), 500
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
