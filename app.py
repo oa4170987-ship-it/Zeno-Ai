@@ -8,11 +8,13 @@
 """
 import base64
 import binascii
+import hmac
 import logging
 import os
 import re
 import threading
 import time
+from collections import OrderedDict, deque
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
@@ -372,6 +374,44 @@ def too_large(_e):
     return jsonify({"error": "حجم الطلب/الملف كبير جداً (الحد الأقصى ~4MB)."}), 413
 
 
+class NoProviders(Exception):
+    pass
+
+
+def generate_reply(username, msg, history, parts=None, has_file=False):
+    """التدفق المشترك (الويب + تيليجرام): Groq ثم Gemini. يرجع (النص, المزوّد, الموديل)."""
+    groq_key = get_groq_key()
+    gemini_keys = get_gemini_keys()
+    if not groq_key and not gemini_keys:
+        raise NoProviders()
+
+    parts = parts or [{"text": msg}]
+    failures = []
+    deadline = time.monotonic() + TIME_BUDGET
+
+    # 1) Groq (نصوص فقط)
+    if groq_key and not has_file:
+        try:
+            text, model = call_groq(groq_key, username, msg, history, deadline)
+            return text, "groq", model
+        except ProviderFailed as e:
+            failures += e.errors
+    elif groq_key and has_file:
+        log.info("تخطي Groq لأن هناك ملفاً مرفقاً؛ الانتقال إلى Gemini.")
+
+    # 2) Gemini
+    if gemini_keys:
+        try:
+            text, model = call_gemini(gemini_keys, username, parts, history, deadline)
+            return text, "gemini", model
+        except ProviderFailed as e:
+            failures += e.errors
+    else:
+        failures.append("Gemini: لا توجد مفاتيح GEMINI_API_KEY مضبوطة.")
+
+    raise ProviderFailed("all", failures)
+
+
 @app.post("/chat")
 def chat():
     username = session.get("username")
@@ -396,36 +436,106 @@ def chat():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    groq_key = get_groq_key()
-    gemini_keys = get_gemini_keys()
-    if not groq_key and not gemini_keys:
+    try:
+        text, provider, model = generate_reply(username, msg, history, parts, bool(file_data))
+        return jsonify({"response": text, "provider": provider, "model": model})
+    except NoProviders:
         return jsonify({"error": "لم يتم ضبط أي مفتاح: أضف GROQ_API_KEY و/أو GEMINI_API_KEY في متغيرات البيئة."}), 500
+    except ProviderFailed as e:
+        error = "تعذّر الحصول على رد من أي مزوّد:\n\n" + "\n".join(f"- {f}" for f in e.errors)
+        return jsonify({"error": error, "details": e.errors}), 502
 
-    failures = []
-    deadline = time.monotonic() + TIME_BUDGET
 
-    # 1) Groq (نصوص فقط)
-    if groq_key and not file_data:
-        try:
-            text, model = call_groq(groq_key, username, msg, history, deadline)
-            return jsonify({"response": text, "provider": "groq", "model": model})
-        except ProviderFailed as e:
-            failures += e.errors
-    elif groq_key and file_data:
-        log.info("تخطي Groq لأن هناك ملفاً مرفقاً؛ الانتقال إلى Gemini.")
+# ---------------------------------------------------------------- Telegram
+TG_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TG_SECRET = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+TG_MAX_CHATS = 500  # أقصى عدد محادثات تُحفظ في الذاكرة
 
-    # 2) Gemini
-    if gemini_keys:
-        try:
-            text, model = call_gemini(gemini_keys, username, parts, history, deadline)
-            return jsonify({"response": text, "provider": "gemini", "model": model})
-        except ProviderFailed as e:
-            failures += e.errors
-    else:
-        failures.append("Gemini: لا توجد مفاتيح GEMINI_API_KEY مضبوطة.")
+_tg_lock = threading.Lock()
+_tg_history = OrderedDict()   # chat_id -> [{role, content}]  (ذاكرة مؤقتة: تضيع مع إعادة تشغيل السيرفر)
+_tg_seen = deque(maxlen=300)  # update_id التي عولجت (لمنع تكرار الرد عند إعادة إرسال تيليجرام)
 
-    error = "تعذّر الحصول على رد من أي مزوّد:\n\n" + "\n".join(f"- {f}" for f in failures)
-    return jsonify({"error": error, "details": failures}), 502
+
+def tg_api(method, payload):
+    """استدعاء Telegram Bot API. لا نسجّل الرابط أبداً لأنه يحتوي التوكن."""
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/{method}", json=payload, timeout=(5, 10))
+        if r.status_code != 200:
+            log.warning("Telegram %s فشل: HTTP %s %s", method, r.status_code, _short(r.text, 150))
+        return r.status_code == 200
+    except requests.RequestException as e:
+        log.warning("Telegram %s فشل: %s", method, type(e).__name__)
+        return False
+
+
+def tg_send(chat_id, text):
+    text = (text or "").strip() or "…"
+    for i in range(0, len(text), 4000):  # حد تيليجرام 4096 حرفاً
+        tg_api("sendMessage", {"chat_id": chat_id, "text": text[i:i + 4000]})
+
+
+def _tg_get_history(chat_id):
+    with _tg_lock:
+        return list(_tg_history.get(chat_id, []))
+
+
+def _tg_save(chat_id, user_text, reply):
+    with _tg_lock:
+        h = _tg_history.pop(chat_id, [])
+        h += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        _tg_history[chat_id] = h[-MAX_HISTORY:]
+        while len(_tg_history) > TG_MAX_CHATS:
+            _tg_history.popitem(last=False)
+
+
+@app.post("/telegram")
+def telegram_webhook():
+    if not TG_TOKEN:
+        return jsonify({"error": "TELEGRAM_BOT_TOKEN غير مضبوط."}), 503
+    if TG_SECRET and not hmac.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), TG_SECRET):
+        return jsonify({"error": "forbidden"}), 403
+
+    update = request.get_json(silent=True) or {}
+    uid = update.get("update_id")
+    with _tg_lock:
+        if uid is not None and uid in _tg_seen:
+            return jsonify({"ok": True})  # مكرر
+        _tg_seen.append(uid)
+
+    message = update.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return jsonify({"ok": True})
+
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    username = clean_username((message.get("from") or {}).get("first_name")) or "صديقي"
+
+    # نردّ دائماً بـ 200 حتى لا يعيد تيليجرام الإرسال بلا نهاية
+    if text.split("@")[0] == "/start":
+        tg_send(chat_id, f"أهلاً {username}! أنا Zeno. اكتب أي سؤال وأرد عليك فوراً ⚡\nاستخدم /new لبدء محادثة جديدة.")
+        return jsonify({"ok": True})
+    if text.split("@")[0] in ("/new", "/clear"):
+        with _tg_lock:
+            _tg_history.pop(chat_id, None)
+        tg_send(chat_id, "تم بدء محادثة جديدة ⚡")
+        return jsonify({"ok": True})
+    if not text:
+        tg_send(chat_id, "حالياً أدعم الرسائل النصية فقط.")
+        return jsonify({"ok": True})
+
+    tg_api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    try:
+        reply, provider, model = generate_reply(username, text, _tg_get_history(chat_id))
+        _tg_save(chat_id, text, reply)
+        log.info("Telegram رد عبر %s (%s)", provider, model)
+        tg_send(chat_id, reply)
+    except NoProviders:
+        log.error("لا توجد مفاتيح GROQ/GEMINI.")
+        tg_send(chat_id, "⚠️ البوت غير مهيّأ بعد (مفاتيح الذكاء الاصطناعي غير مضبوطة).")
+    except ProviderFailed as e:
+        log.error("فشل كل المزوّدين: %s", " | ".join(e.errors))
+        tg_send(chat_id, "⚠️ حصل خطأ مؤقت، حاول مرة أخرى بعد قليل.")
+    return jsonify({"ok": True})
 
 
 @app.route("/debug-env")
