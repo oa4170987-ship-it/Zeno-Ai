@@ -373,6 +373,19 @@ def chat():
     return jsonify({"error": error, "details": failures}), 502
 
 
+@app.route("/debug-env")
+def debug_env():
+    """تشخيص مؤقت: يعرض فقط هل المتغيرات موجودة (true/false) دون كشف القيم. احذفه بعد الانتهاء."""
+    if not session.get("username"):
+        return jsonify({"error": "سجّل الدخول أولاً ثم افتح /debug-env"}), 401
+    names = ["GROQ_API_KEY", "GEMINI_API_KEY"] + [f"GEMINI_API_KEY_{i}" for i in range(1, 11)] + ["SECRET_KEY"]
+    return jsonify({
+        "env": {n: bool((os.getenv(n) or "").strip()) for n in names},
+        "groq_models": GROQ_MODELS,
+        "gemini_models": GEMINI_MODELS,
+    })
+
+
 if __name__ == "__main__":
     app.run(
         host=os.getenv("HOST", "127.0.0.1"),
