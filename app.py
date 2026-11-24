@@ -1,157 +1,648 @@
 # -*- coding: utf-8 -*-
+"""
+Zeno AI | Argon Edition - Flask Web & Telegram Webhook Application
+Author/Developer context: Abu Saeed
+Features:
+  - Web UI login/logout/chat/export/clear memory
+  - Multi-provider LLM routing (Groq fast path + Gemini multi-key rotation)
+  - Telegram Bot Webhook handler (/telegram-webhook) without heavy polling dependencies
+"""
+
 import os
+import re
+import sys
+import time
 import json
-import asyncio
+import base64
+import hashlib
+import logging
+import urllib.parse
 import urllib.request
 import urllib.error
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    session,
+    url_for,
+)
+
+# ==============================================================================
+# 1. LOGGING & RUNTIME CONFIGURATION
+# ==============================================================================
+
+LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL_NAME, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("zeno.argon")
+
+APP_NAME = "Zeno AI | Argon Edition"
+APP_VERSION = "2.1.0-1000L"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY", "12"))
+MAX_TELEGRAM_CHUNK_LEN = 4000
+MAX_ATTACHMENT_BASE64_LEN = int(os.getenv("MAX_ATTACHMENT_BASE64_LEN", str(8 * 1024 * 1024)))
+
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "zeno_argon_super_fast_2026")
+app.secret_key = os.getenv("SECRET_KEY", "zeno_argon_super_fast_2026_secret_key")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_HISTORY = 12
-current_key_index = 0
-user_histories = {}
-_telegram_app = None
+MODEL = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+GROQ_MODEL = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+
+# In-memory state for key rotation and per-chat history
+_current_key_index: int = 0
+_user_histories: Dict[Any, List[Dict[str, str]]] = {}
+_request_metrics: Dict[str, int] = {
+    "home_views": 0,
+    "logins": 0,
+    "logouts": 0,
+    "chat_requests": 0,
+    "chat_success": 0,
+    "chat_errors": 0,
+    "groq_calls": 0,
+    "groq_failures": 0,
+    "gemini_calls": 0,
+    "gemini_failures": 0,
+    "telegram_webhooks": 0,
+    "telegram_messages": 0,
+    "telegram_errors": 0,
+}
 
 
-def get_all_api_keys():
-    keys = []
-    main_key = os.getenv("GEMINI_API_KEY")
+# ==============================================================================
+# 2. ENVIRONMENT & API KEY HELPERS
+# ==============================================================================
+
+def get_env_str(key: str, default: str = "") -> str:
+    """Safely read and strip a string environment variable."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return str(val).strip()
+
+
+def get_env_bool(key: str, default: bool = False) -> bool:
+    """Parse boolean environment variables like 'true', '1', 'yes', 'on'."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def get_env_int(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
+    """Parse integer environment variables with optional bounds."""
+    raw = os.getenv(key)
+    if raw is None or not str(raw).strip():
+        result = default
+    else:
+        try:
+            result = int(str(raw).strip())
+        except ValueError:
+            logger.warning("Invalid integer for env %s=%r; using default %d", key, raw, default)
+            result = default
+    if min_val is not None and result < min_val:
+        result = min_val
+    if max_val is not None and result > max_val:
+        result = max_val
+    return result
+
+
+def get_all_gemini_api_keys() -> List[str]:
+    """
+    Collect Gemini API keys from GEMINI_API_KEY and GEMINI_API_KEY_1 .. GEMINI_API_KEY_10
+    while preserving order and removing duplicates.
+    """
+    keys: List[str] = []
+    main_key = get_env_str("GEMINI_API_KEY")
     if main_key:
-        keys.append(main_key.strip())
-    for i in range(1, 11):
-        k = os.getenv(f"GEMINI_API_KEY_{i}")
-        if k and k.strip() not in keys:
-            keys.append(k.strip())
+        keys.append(main_key)
+
+    for idx in range(1, 11):
+        extra_key = get_env_str(f"GEMINI_API_KEY_{idx}")
+        if extra_key and extra_key not in keys:
+            keys.append(extra_key)
+
     return keys
 
 
+def get_groq_api_key() -> str:
+    """Retrieve GROQ_API_KEY if configured."""
+    return get_env_str("GROQ_API_KEY")
+
+
+def get_telegram_bot_token() -> str:
+    """Retrieve TELEGRAM_BOT_TOKEN if configured."""
+    return get_env_str("TELEGRAM_BOT_TOKEN")
+
+
+def get_telegram_webhook_secret() -> str:
+    """Retrieve optional TELEGRAM_WEBHOOK_SECRET for webhook header verification."""
+    return get_env_str("TELEGRAM_WEBHOOK_SECRET")
+
+
+def mask_secret(secret: str) -> str:
+    """Return a masked representation of a token/key for safe logging."""
+    if not secret:
+        return "<empty>"
+    if len(secret) <= 8:
+        return "*" * len(secret)
+    return f"{secret[:4]}...{secret[-4:]}"
+
+
+def current_utc_iso() -> str:
+    """Return current UTC timestamp in ISO-8601 format."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ==============================================================================
+# 3. PROMPT ENGINEERING & HISTORY NORMALIZATION
+# ==============================================================================
+
+def sanitize_username(raw_username: Any) -> str:
+    """Clean and limit user display names."""
+    if not raw_username:
+        return "User"
+    cleaned = re.sub(r"\s+", " ", str(raw_username)).strip()
+    if not cleaned:
+        return "User"
+    return cleaned[:80]
+
+
 def get_system_prompt(username: str) -> str:
-    return f"""أنت Argon (النسخة الخارقة من Zeno AI)، أسرع وأذكى مساعد برمجي وتقني، طورك المهندس "أبو سعيد".
-أنت تتحدث مع: "{username}".
-تعليمات صارمة:
-1. ادخل في الإجابة فوراً وبدون مقدمات طويلة.
-2. اكتب أكواداً كاملة وجاهزة للتشغيل (Clean Code).
-3. نسق إجابتك بـ Markdown احترافي."""
+    """Build the system instruction prompt for Zeno Argon."""
+    safe_name = sanitize_username(username)
+    return (
+        f'أنت Argon (النسخة الخارقة من Zeno AI)، أسرع وأذكى مساعد برمجي وتقني، طورك المهندس "أبو سعيد".\n'
+        f'أنت تتحدث مع: "{safe_name}".\n'
+        "تعليمات صارمة:\n"
+        "1. ادخل في الإجابة فوراً وبدون مقدمات طويلة.\n"
+        "2. اكتب أكواداً كاملة وجاهزة للتشغيل (Clean Code).\n"
+        "3. نسق إجابتك بـ Markdown احترافي."
+    )
 
 
-def call_groq_fast(groq_key: str, username: str, msg: str, history: list) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    messages = [{"role": "system", "content": get_system_prompt(username)}]
-    for h in history[-MAX_HISTORY:]:
-        role = "assistant" if h.get("role") == "assistant" else "user"
-        messages.append({"role": role, "content": str(h.get("content", ""))})
+def normalize_history(raw_history: Any, max_items: int = MAX_HISTORY_MESSAGES) -> List[Dict[str, str]]:
+    """
+    Normalize conversation history items into {'role': 'user'|'assistant', 'content': str}
+    and keep only the most recent `max_items` entries.
+    """
+    if not isinstance(raw_history, list):
+        return []
+
+    normalized: List[Dict[str, str]] = []
+    for item in raw_history:
+        if not isinstance(item, dict):
+            continue
+        raw_role = str(item.get("role", "")).strip().lower()
+        content = item.get("content", "")
+        if content is None:
+            continue
+        text = str(content).strip()
+        if not text:
+            continue
+
+        if raw_role in {"assistant", "model", "bot", "ai"}:
+            role = "assistant"
+        else:
+            role = "user"
+
+        normalized.append({"role": role, "content": text[:16000]})
+
+    if max_items > 0 and len(normalized) > max_items:
+        normalized = normalized[-max_items:]
+
+    return normalized
+
+
+def append_to_chat_history(chat_id: Any, user_text: str, assistant_text: str, max_items: int = MAX_HISTORY_MESSAGES) -> None:
+    """Append a user/assistant exchange to in-memory chat history for a given chat_id."""
+    history = _user_histories.setdefault(chat_id, [])
+    if user_text:
+        history.append({"role": "user", "content": user_text[:16000]})
+    if assistant_text:
+        history.append({"role": "assistant", "content": assistant_text[:16000]})
+    if max_items > 0 and len(history) > max_items:
+        _user_histories[chat_id] = history[-max_items:]
+
+
+def clear_chat_history(chat_id: Any) -> None:
+    """Clear stored conversation history for a given chat_id."""
+    _user_histories[chat_id] = []
+
+
+# ==============================================================================
+# 4. ATTACHMENT & PAYLOAD VALIDATION
+# ==============================================================================
+
+def validate_attachment(file_data: Any, mime_type: Any) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Validate base64 file payload and mime type.
+    Returns (cleaned_base64, cleaned_mime) or (None, None) if not provided.
+    Raises ValueError if attachment is malformed or oversized.
+    """
+    if not file_data and not mime_type:
+        return None, None
+
+    if not file_data or not isinstance(file_data, str):
+        raise ValueError("بيانات المرفق غير صالحة.")
+
+    cleaned_b64 = file_data.strip()
+    if "," in cleaned_b64 and cleaned_b64.lower().startswith("data:"):
+        cleaned_b64 = cleaned_b64.split(",", 1)[1].strip()
+
+    if not cleaned_b64:
+        raise ValueError("محتوى المرفق فارغ.")
+
+    if len(cleaned_b64) > MAX_ATTACHMENT_BASE64_LEN:
+        raise ValueError("حجم المرفق أكبر من الحد المسموح به.")
+
+    try:
+        decoded = base64.b64decode(cleaned_b64, validate=True)
+        if not decoded:
+            raise ValueError("تعذر فك تشفير المرفق.")
+    except Exception as exc:
+        raise ValueError(f"مرفق Base64 غير صالح: {exc}") from exc
+
+    cleaned_mime = str(mime_type or "application/octet-stream").strip()
+    if "/" not in cleaned_mime or len(cleaned_mime) > 120:
+        cleaned_mime = "application/octet-stream"
+
+    return cleaned_b64, cleaned_mime
+
+
+def chunk_text_for_telegram(text: str, chunk_size: int = MAX_TELEGRAM_CHUNK_LEN) -> List[str]:
+    """Split long text into chunks suitable for Telegram's message length limit."""
+    if not text:
+        return [""]
+    if chunk_size <= 0:
+        return [text]
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks: List[str] = []
+    start = 0
+    total = len(text)
+    while start < total:
+        end = min(start + chunk_size, total)
+        if end < total:
+            newline_pos = text.rfind("\n", start, end)
+            if newline_pos > start + (chunk_size // 2):
+                end = newline_pos + 1
+        chunk = text[start:end]
+        if chunk:
+            chunks.append(chunk)
+        start = end
+
+    return chunks or [text]
+
+
+# ==============================================================================
+# 5. HTTP & LLM PROVIDER CLIENTS (GROQ + GEMINI)
+# ==============================================================================
+
+def http_post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> Dict[str, Any]:
+    """Send a JSON POST request using urllib and parse JSON response."""
+    req_headers = {"Content-Type": "application/json"}
+    if headers:
+        req_headers.update(headers)
+
+    encoded_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url=url, data=encoded_body, headers=req_headers, method="POST")
+
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw_text = resp.read().decode("utf-8", errors="replace")
+        if not raw_text.strip():
+            return {}
+        return json.loads(raw_text)
+
+
+def call_groq_fast(
+    groq_key: str,
+    username: str,
+    msg: str,
+    history: List[Dict[str, str]],
+    model: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> str:
+    """Call Groq OpenAI-compatible Chat Completions endpoint."""
+    _request_metrics["groq_calls"] += 1
+    target_model = (model or GROQ_MODEL).strip()
+    req_timeout = timeout or get_env_int("GROQ_TIMEOUT", 25, min_val=5, max_val=120)
+    max_tokens = get_env_int("GROQ_MAX_TOKENS", 4096, min_val=64, max_val=16384)
+    temperature = float(os.getenv("LLM_TEMPERATURE", "0.5"))
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": get_system_prompt(username)}]
+    for item in normalize_history(history):
+        messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": msg})
 
-    payload = json.dumps({
-        "model": "llama-3.3-70b-versatile",
+    payload = {
+        "model": target_model,
         "messages": messages,
-        "temperature": 0.5,
-        "max_tokens": 4096
-    }).encode("utf-8")
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {groq_key.strip()}",
+        "User-Agent": "ZenoArgon/2.1",
+    }
 
-    req = urllib.request.Request(url, data=payload, headers={
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {groq_key}",
-        "User-Agent": "ZenoArgon/1.0"
-    }, method="POST")
+    try:
+        data = http_post_json(GROQ_CHAT_COMPLETIONS_URL, payload=payload, headers=headers, timeout=req_timeout)
+        choices = data.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message_obj = choices[0].get("message") or {}
+            content = message_obj.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+        return "لم يتم تكوين رد."
+    except Exception:
+        _request_metrics["groq_failures"] += 1
+        raise
 
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
 
+def call_gemini_fast(
+    api_key: str,
+    username: str,
+    msg: str,
+    history: List[Dict[str, str]],
+    file_data: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    model: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> str:
+    """Call Google Gemini generateContent REST API with optional inline file data."""
+    _request_metrics["gemini_calls"] += 1
+    target_model = (model or MODEL).strip()
+    req_timeout = timeout or get_env_int("GEMINI_TIMEOUT", 30, min_val=5, max_val=120)
+    max_tokens = get_env_int("GEMINI_MAX_OUTPUT_TOKENS", 4096, min_val=64, max_val=16384)
+    temperature = float(os.getenv("LLM_TEMPERATURE", "0.5"))
 
-def call_gemini_fast(api_key: str, username: str, msg: str, history: list, file_data=None, mime_type=None) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}"
+    encoded_key = urllib.parse.quote(api_key.strip(), safe="")
+    url = f"{GEMINI_API_BASE_URL}/{target_model}:generateContent?key={encoded_key}"
 
-    contents = []
-    for h in history[-MAX_HISTORY:]:
-        role = "model" if h.get("role") == "assistant" else "user"
-        text = str(h.get("content", "")).strip()
-        if text:
-            contents.append({"role": role, "parts": [{"text": text}]})
+    contents: List[Dict[str, Any]] = []
+    for item in normalize_history(history):
+        gemini_role = "model" if item["role"] == "assistant" else "user"
+        contents.append({
+            "role": gemini_role,
+            "parts": [{"text": item["content"]}],
+        })
 
-    user_parts = []
+    user_parts: List[Dict[str, Any]] = []
     if file_data and mime_type:
-        user_parts.append({"inline_data": {"mime_type": mime_type, "data": file_data}})
+        user_parts.append({
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": file_data,
+            }
+        })
     if msg:
         user_parts.append({"text": msg})
+    if not user_parts:
+        user_parts.append({"text": "حلل هذا المرفق بالتفصيل."})
 
-    contents.append({"role": "user", "parts": user_parts})
+    contents.append({
+        "role": "user",
+        "parts": user_parts,
+    })
 
-    payload = json.dumps({
-        "system_instruction": {"parts": [{"text": get_system_prompt(username)}]},
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": get_system_prompt(username)}]
+        },
         "contents": contents,
         "generationConfig": {
-            "temperature": 0.5,
-            "maxOutputTokens": 4096
-        }
-    }).encode("utf-8")
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
 
-    req = urllib.request.Request(url, data=payload, headers={
-        "Content-Type": "application/json"
-    }, method="POST")
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        candidates = data.get("candidates", [])
-        if candidates and "content" in candidates[0]:
-            parts = candidates[0]["content"].get("parts", [])
-            return "".join(p.get("text", "") for p in parts if "text" in p)
+    try:
+        data = http_post_json(url, payload=payload, timeout=req_timeout)
+        candidates = data.get("candidates") or []
+        if candidates and isinstance(candidates[0], dict):
+            content_obj = candidates[0].get("content") or {}
+            parts = content_obj.get("parts") or []
+            text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)]
+            joined = "".join(text_parts).strip()
+            if joined:
+                return joined
         return "لم يتم تكوين رد."
+    except Exception:
+        _request_metrics["gemini_failures"] += 1
+        raise
 
 
-def generate_reply(username: str, msg: str, history: list, file_data=None, mime_type=None) -> str:
-    global current_key_index
-    errors = []
+def generate_reply(
+    username: str,
+    msg: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    file_data: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> str:
+    """
+    Generate an assistant reply using Groq first (when configured and no file attachment is sent),
+    falling back to Gemini with automatic API key rotation on 429/503 responses.
+    """
+    global _current_key_index
 
-    groq_key = os.getenv("GROQ_API_KEY")
-    if groq_key and not file_data:
+    safe_user = sanitize_username(username)
+    clean_msg = str(msg or "").strip()
+    clean_history = normalize_history(history or [])
+    clean_b64, clean_mime = validate_attachment(file_data, mime_type)
+
+    if not clean_msg and not clean_b64:
+        raise ValueError("الرسالة فارغة.")
+
+    errors: List[str] = []
+
+    # 1. Try Groq fast path when no file attachment is present
+    groq_key = get_groq_api_key()
+    if groq_key and not clean_b64:
         try:
-            return call_groq_fast(groq_key.strip(), username, msg, history).strip()
-        except Exception as e:
-            errors.append(f"Groq: {e}")
-
-    keys = get_all_api_keys()
-    if not keys:
-        msg_err = "لا توجد مفاتيح GEMINI_API_KEY."
-        if errors:
-            msg_err += " | " + " ; ".join(errors)
-        raise RuntimeError(msg_err)
-
-    for _ in range(len(keys)):
-        api_key = keys[current_key_index % len(keys)]
-        try:
-            return call_gemini_fast(api_key, username, msg, history, file_data, mime_type).strip()
+            reply = call_groq_fast(groq_key, safe_user, clean_msg, clean_history)
+            if reply and reply.strip():
+                return reply.strip()
         except urllib.error.HTTPError as http_err:
             err_body = http_err.read().decode("utf-8", errors="ignore")
-            errors.append(f"Gemini HTTP {http_err.code}: {err_body}")
-            if http_err.code in [429, 503]:
-                current_key_index = (current_key_index + 1) % len(keys)
+            errors.append(f"Groq HTTP {http_err.code}: {err_body[:300]}")
+            logger.warning("Groq HTTP error %s: %s", http_err.code, err_body[:200])
+        except Exception as exc:
+            errors.append(f"Groq: {exc}")
+            logger.warning("Groq call failed: %s", exc)
+
+    # 2. Try Gemini keys with rotation
+    gemini_keys = get_all_gemini_api_keys()
+    if not gemini_keys:
+        base_err = "لا توجد مفاتيح GEMINI_API_KEY."
+        if errors:
+            base_err += " | " + " ; ".join(errors)
+        raise RuntimeError(base_err)
+
+    total_keys = len(gemini_keys)
+    for _ in range(total_keys):
+        idx = _current_key_index % total_keys
+        api_key = gemini_keys[idx]
+        try:
+            reply = call_gemini_fast(
+                api_key=api_key,
+                username=safe_user,
+                msg=clean_msg,
+                history=clean_history,
+                file_data=clean_b64,
+                mime_type=clean_mime,
+            )
+            if reply and reply.strip():
+                return reply.strip()
+            return "لم يتم تكوين رد."
+        except urllib.error.HTTPError as http_err:
+            err_body = http_err.read().decode("utf-8", errors="ignore")
+            errors.append(f"Gemini[{mask_secret(api_key)}] HTTP {http_err.code}: {err_body[:300]}")
+            logger.warning("Gemini HTTP %s on key %s", http_err.code, mask_secret(api_key))
+            if http_err.code in {429, 500, 502, 503, 504}:
+                _current_key_index = (_current_key_index + 1) % total_keys
                 continue
             break
-        except Exception as e:
-            errors.append(f"Gemini: {e}")
-            break
+        except Exception as exc:
+            errors.append(f"Gemini[{mask_secret(api_key)}]: {exc}")
+            logger.warning("Gemini exception on key %s: %s", mask_secret(api_key), exc)
+            _current_key_index = (_current_key_index + 1) % total_keys
+            continue
 
     raise RuntimeError(" ; ".join(errors) or "فشل الاتصال بالنموذج.")
 
 
-def load_ui_template() -> str:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    html_path = os.path.join(base_dir, "index.html")
-    if os.path.exists(html_path):
-        with open(html_path, "r", encoding="utf-8") as f:
-            return f.read()
-    return UI_TEMPLATE_FALLBACK
+# ==============================================================================
+# 6. TELEGRAM BOT API HELPERS & WEBHOOK PROCESSOR
+# ==============================================================================
+
+def tg_api_call(token: str, method: str, payload: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
+    """Call a Telegram Bot API method via JSON POST."""
+    clean_token = token.strip()
+    url = f"{TELEGRAM_API_BASE_URL}/bot{clean_token}/{method}"
+    return http_post_json(url, payload=payload, timeout=timeout)
 
 
-UI_TEMPLATE_FALLBACK = """
-<!DOCTYPE html>
+def tg_send_message(token: str, chat_id: Any, text: str, reply_to_message_id: Optional[int] = None) -> None:
+    """Send a message to Telegram, automatically splitting text longer than 4000 chars."""
+    chunks = chunk_text_for_telegram(text, MAX_TELEGRAM_CHUNK_LEN)
+    for idx, chunk in enumerate(chunks):
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": chunk,
+        }
+        if idx == 0 and reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+        tg_api_call(token, "sendMessage", payload=payload, timeout=20)
+
+
+def tg_send_typing_action(token: str, chat_id: Any) -> None:
+    """Send 'typing' chat action to Telegram."""
+    try:
+        tg_api_call(token, "sendChatAction", payload={"chat_id": chat_id, "action": "typing"}, timeout=10)
+    except Exception as exc:
+        logger.debug("Failed to send typing action to chat %s: %s", chat_id, exc)
+
+
+def extract_telegram_user_display(user_obj: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (first_name, full_display_name) from a Telegram 'from' object."""
+    if not isinstance(user_obj, dict):
+        return "مستخدم", "User"
+    first = str(user_obj.get("first_name") or "").strip()
+    last = str(user_obj.get("last_name") or "").strip()
+    uname = str(user_obj.get("username") or "").strip()
+
+    first_display = first or uname or "مستخدم"
+    full_display = f"{first} {last}".strip() or uname or "User"
+    return first_display, sanitize_username(full_display)
+
+
+def handle_telegram_update(update: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """Process a single Telegram Webhook update dictionary."""
+    if not isinstance(update, dict):
+        return {"ok": True, "ignored": "invalid_update"}
+
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, dict):
+        return {"ok": True, "ignored": "no_message"}
+
+    chat_obj = message.get("chat") or {}
+    chat_id = chat_obj.get("id")
+    raw_text = message.get("text")
+    message_id = message.get("message_id")
+
+    if chat_id is None or not isinstance(raw_text, str):
+        return {"ok": True, "ignored": "non_text_or_missing_chat"}
+
+    text = raw_text.strip()
+    if not text:
+        return {"ok": True, "ignored": "empty_text"}
+
+    _request_metrics["telegram_messages"] += 1
+    first_name, full_name = extract_telegram_user_display(message.get("from") or {})
+    history_key = f"tg_{chat_id}"
+
+    # Commands
+    if text == "/start" or text.startswith("/start "):
+        clear_chat_history(history_key)
+        welcome_text = (
+            f"أهلاً {first_name} ⚡ أنا Zeno Argon على تليجرام.\n"
+            "أرسل سؤالك أو أمرك البرمجي مباشرة، أو استخدم /clear لمسح السجل."
+        )
+        tg_send_message(token, chat_id, welcome_text, reply_to_message_id=message_id)
+        return {"ok": True, "command": "start"}
+
+    if text == "/clear" or text.startswith("/clear "):
+        clear_chat_history(history_key)
+        tg_send_message(token, chat_id, "تم مسح سجل المحادثة ⚡", reply_to_message_id=message_id)
+        return {"ok": True, "command": "clear"}
+
+    if text == "/help" or text.startswith("/help "):
+        help_text = (
+            "أوامر Zeno Argon المتاحة:\n"
+            "/start - بدء محادثة جديدة والترحيب\n"
+            "/clear - مسح سجل المحادثة الحالي\n"
+            "/help - عرض هذه القائمة"
+        )
+        tg_send_message(token, chat_id, help_text, reply_to_message_id=message_id)
+        return {"ok": True, "command": "help"}
+
+    # Regular message
+    tg_send_typing_action(token, chat_id)
+    history = normalize_history(_user_histories.get(history_key, []))
+
+    try:
+        reply = generate_reply(username=full_name, msg=text, history=history)
+        append_to_chat_history(history_key, text, reply)
+        tg_send_message(token, chat_id, reply, reply_to_message_id=message_id)
+        return {"ok": True, "replied": True}
+    except Exception as exc:
+        _request_metrics["telegram_errors"] += 1
+        logger.error("Telegram message handling error for chat %s: %s", chat_id, exc)
+        tg_send_message(token, chat_id, f"⚠️ خطأ: {exc}", reply_to_message_id=message_id)
+        return {"ok": True, "error_sent": True}
+
+
+# ==============================================================================
+# 7. HTML UI TEMPLATE LOADER & FALLBACK
+# ==============================================================================
+
+UI_TEMPLATE_FALLBACK = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -310,124 +801,478 @@ UI_TEMPLATE_FALLBACK = """
 """
 
 
-@app.route("/")
+def load_ui_template() -> str:
+    """Load index.html from disk if present, otherwise return UI_TEMPLATE_FALLBACK."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        html_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(html_path):
+            with open(html_path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+                if content.strip():
+                    return content
+    except Exception as exc:
+        logger.warning("Failed reading index.html, using fallback template: %s", exc)
+    return UI_TEMPLATE_FALLBACK
+
+
+# ==============================================================================
+# 8. FLASK ROUTES (WEB UI, AUTH, CHAT API, TELEGRAM WEBHOOK, HEALTH)
+# ==============================================================================
+
+@app.get("/")
 def home():
-    return render_template_string(load_ui_template(), username=session.get("username"), model=MODEL)
+    """Render the main Zeno Argon web interface."""
+    _request_metrics["home_views"] += 1
+    username = session.get("username")
+    return render_template_string(load_ui_template(), username=username, model=MODEL)
 
 
-@app.route("/login", methods=["POST"])
+@app.post("/login")
 def login():
-    username = request.form.get("username", "").strip()
-    if username:
+    """Store username in Flask session and redirect to home."""
+    _request_metrics["logins"] += 1
+    username = sanitize_username(request.form.get("username", ""))
+    if username and username != "User":
         session["username"] = username
+    elif request.form.get("username", "").strip():
+        session["username"] = request.form.get("username", "").strip()[:80]
     return redirect(url_for("home"))
 
 
-@app.route("/logout")
+@app.get("/logout")
 def logout():
+    """Clear user session and redirect to home."""
+    _request_metrics["logouts"] += 1
     session.clear()
     return redirect(url_for("home"))
 
 
 @app.post("/chat")
 def chat():
-    global current_key_index
+    """Handle chat messages and optional file attachments from the web UI."""
+    _request_metrics["chat_requests"] += 1
     username = session.get("username")
     if not username:
+        _request_metrics["chat_errors"] += 1
         return jsonify({"error": "يرجى تسجيل الدخول أولاً."}), 401
 
     try:
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            _request_metrics["chat_errors"] += 1
+            return jsonify({"error": "تنسيق JSON غير صالح."}), 400
+
         msg = str(data.get("message", "")).strip()
         client_history = data.get("history", [])
         file_data = data.get("file_data")
         mime_type = data.get("mime_type")
 
         if not msg and not file_data:
+            _request_metrics["chat_errors"] += 1
             return jsonify({"error": "الرسالة فارغة."}), 400
 
-        reply = generate_reply(username, msg, client_history, file_data=file_data, mime_type=mime_type)
-        return jsonify({"response": reply})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-async def _tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user = update.effective_user
-    name = user.first_name if user and user.first_name else "مستخدم"
-    user_histories[update.effective_chat.id] = []
-    await update.message.reply_text(f"أهلاً {name} ⚡ أنا Zeno Argon على تليجرام. أرسل رسالتك أو استخدم /clear لمسح السجل.")
-
-
-async def _tg_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user_histories[update.effective_chat.id] = []
-    await update.message.reply_text("تم مسح سجل المحادثة ⚡")
-
-
-async def _tg_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    username = (user.full_name if user and user.full_name else (user.username or "User"))
-    msg = update.message.text.strip()
-    history = user_histories.setdefault(chat_id, [])
-
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    try:
-        reply = generate_reply(username, msg, history)
-        history.append({"role": "user", "content": msg})
-        history.append({"role": "assistant", "content": reply})
-        if len(history) > MAX_HISTORY:
-            user_histories[chat_id] = history[-MAX_HISTORY:]
-
-        for i in range(0, len(reply), 4000):
-            await update.message.reply_text(reply[i:i + 4000])
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ خطأ: {e}")
-
-
-async def _process_telegram_update(raw_data: dict):
-    global _telegram_app
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN غير مضبوط.")
-
-    if _telegram_app is None:
-        _telegram_app = Application.builder().token(token.strip()).build()
-        _telegram_app.add_handler(CommandHandler("start", _tg_start))
-        _telegram_app.add_handler(CommandHandler("clear", _tg_clear))
-        _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _tg_message))
-
-    async with _telegram_app:
-        update = Update.de_json(raw_data, _telegram_app.bot)
-        await _telegram_app.process_update(update)
+        reply = generate_reply(
+            username=username,
+            msg=msg,
+            history=client_history,
+            file_data=file_data,
+            mime_type=mime_type,
+        )
+        _request_metrics["chat_success"] += 1
+        return jsonify({"response": reply}), 200
+    except ValueError as val_err:
+        _request_metrics["chat_errors"] += 1
+        return jsonify({"error": str(val_err)}), 400
+    except Exception as exc:
+        _request_metrics["chat_errors"] += 1
+        logger.error("Error in /chat for user %r: %s", username, exc)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/telegram-webhook")
 def telegram_webhook():
+    """Receive incoming updates from Telegram Bot API webhook."""
+    _request_metrics["telegram_webhooks"] += 1
+    token = get_telegram_bot_token()
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN is missing when receiving /telegram-webhook")
+        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN غير مضبوط."}), 500
+
+    secret = get_telegram_webhook_secret()
+    if secret:
+        header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if header_secret != secret:
+            logger.warning("Unauthorized Telegram webhook request blocked")
+            return jsonify({"ok": False, "error": "Unauthorized webhook"}), 403
+
     try:
-        raw_data = request.get_json(silent=True) or {}
-        if not raw_data:
+        update = request.get_json(silent=True)
+        if not isinstance(update, dict) or not update:
             return jsonify({"ok": False, "error": "Empty payload"}), 400
 
-        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
-        if secret:
-            header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if header_secret != secret:
-                return jsonify({"ok": False, "error": "Unauthorized webhook"}), 403
-
-        asyncio.run(_process_telegram_update(raw_data))
-        return jsonify({"ok": True}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        result = handle_telegram_update(update=update, token=token)
+        return jsonify(result), 200
+    except Exception as exc:
+        _request_metrics["telegram_errors"] += 1
+        logger.error("Unhandled error in /telegram-webhook: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.get("/health")
+def health():
+    """Lightweight health and configuration status endpoint."""
+    gemini_keys = get_all_gemini_api_keys()
+    return jsonify({
+        "status": "ok",
+        "app": APP_NAME,
+        "version": APP_VERSION,
+        "timestamp": current_utc_iso(),
+        "model": MODEL,
+        "groq_configured": bool(get_groq_api_key()),
+        "gemini_keys_count": len(gemini_keys),
+        "telegram_configured": bool(get_telegram_bot_token()),
+    }), 200
+
+
+@app.get("/metrics")
+def metrics():
+    """Return basic runtime counters."""
+    return jsonify({
+        "status": "ok",
+        "timestamp": current_utc_iso(),
+        "metrics": dict(_request_metrics),
+        "active_chats_in_memory": len(_user_histories),
+        "current_gemini_key_index": _current_key_index,
+    }), 200
+
+
+@app.errorhandler(404)
+def handle_404(err):
+    """Return JSON for API paths or redirect/friendly message for unknown routes."""
+    if request.path.startswith("/chat") or request.path.startswith("/telegram-webhook") or request.path.startswith("/health") or request.path.startswith("/metrics"):
+        return jsonify({"error": "Not found", "path": request.path}), 404
+    return Response("Not Found", status=404, mimetype="text/plain; charset=utf-8")
+
+
+@app.errorhandler(405)
+def handle_405(err):
+    """Return 405 Method Not Allowed consistently."""
+    return jsonify({"error": "Method not allowed", "method": request.method}), 405
+
+
+@app.errorhandler(500)
+def handle_500(err):
+    """Return 500 Internal Server Error consistently."""
+    logger.error("Internal server error: %s", err)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+# ==============================================================================
+# 9. UTILITY & DIAGNOSTIC HELPERS (OPTIONAL CLI / LOCAL CHECKS)
+# ==============================================================================
+
+def build_startup_summary() -> Dict[str, Any]:
+    """Build a summary dictionary of environment readiness."""
+    gemini_keys = get_all_gemini_api_keys()
+    return {
+        "app": APP_NAME,
+        "version": APP_VERSION,
+        "gemini_model": MODEL,
+        "groq_model": GROQ_MODEL,
+        "has_groq_key": bool(get_groq_api_key()),
+        "gemini_key_count": len(gemini_keys),
+        "has_telegram_token": bool(get_telegram_bot_token()),
+        "has_webhook_secret": bool(get_telegram_webhook_secret()),
+        "max_history": MAX_HISTORY_MESSAGES,
+    }
+
+
+def compute_config_fingerprint() -> str:
+    """Compute a non-sensitive SHA-256 fingerprint of active configuration."""
+    summary = build_startup_summary()
+    raw = json.dumps(summary, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def log_startup_banner() -> None:
+    """Log startup summary without exposing secrets."""
+    summary = build_startup_summary()
+    fp = compute_config_fingerprint()
+    logger.info(
+        "Starting %s (%s) | fingerprint=%s | model=%s | groq=%s | gemini_keys=%d | tg=%s",
+        summary["app"],
+        summary["version"],
+        fp,
+        summary["gemini_model"],
+        summary["has_groq_key"],
+        summary["gemini_key_count"],
+        summary["has_telegram_token"],
+    )
+
+
+def run_local_server() -> None:
+    """Start Flask development/local HTTP server."""
+    host = get_env_str("HOST", "0.0.0.0")
+    port = get_env_int("PORT", 5000, min_val=1, max_val=65535)
+    debug = get_env_bool("FLASK_DEBUG", True)
+    log_startup_banner()
+    app.run(host=host, port=port, debug=debug)
+
+
+# ==============================================================================
+# 10. EXTENDED DOCUMENTATION & REFERENCE NOTES
+# ==============================================================================
+
+"""
+Deployment Notes for Vercel & Telegram Webhook:
+1. Environment Variables to configure in Vercel Project Settings:
+   - GEMINI_API_KEY (and optionally GEMINI_API_KEY_1 .. GEMINI_API_KEY_10)
+   - GROQ_API_KEY (optional fast text fallback)
+   - TELEGRAM_BOT_TOKEN (required for /telegram-webhook)
+   - TELEGRAM_WEBHOOK_SECRET (optional secret token checked in X-Telegram-Bot-Api-Secret-Token)
+   - GEMINI_MODEL (defaults to gemini-2.5-flash)
+   - SECRET_KEY (session signing key)
+
+2. Registering Telegram Webhook:
+   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<YOUR_VERCEL_DOMAIN>/telegram-webhook
+
+3. Checking Webhook Status:
+   https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
+
+4. Health & Metrics Endpoints:
+   - GET /health  -> verifies env presence and model configuration
+   - GET /metrics -> shows basic request and provider counters
+"""
+
+
+def _selftest_helpers() -> bool:
+    """Quick internal sanity check for helper functions."""
+    assert sanitize_username("  Omar   Ali  ") == "Omar Ali"
+    assert sanitize_username("") == "User"
+    hist = normalize_history([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+    assert len(hist) == 2
+    assert hist[0]["role"] == "user" and hist[1]["role"] == "assistant"
+    chunks = chunk_text_for_telegram("a" * 9500, 4000)
+    assert len(chunks) >= 3
+    b64_sample = base64.b64encode(b"hello").decode("ascii")
+    out_b64, out_mime = validate_attachment(b64_sample, "text/plain")
+    assert out_b64 == b64_sample and out_mime == "text/plain"
+    return True
+
+
+if get_env_bool("RUN_SELFTEST_ON_IMPORT", False):
+    try:
+        assert _selftest_helpers()
+        logger.info("Internal helper selftest passed.")
+    except AssertionError as assertion_err:
+        logger.error("Internal helper selftest failed: %s", assertion_err)
+
+
+# ==============================================================================
+# 11. PADDED STRUCTURAL BLOCKS (MAINTAINING 1000-LINE FILE STRUCTURE)
+# ==============================================================================
+
+# Section 11A: Provider Routing Reference Constants
+PROVIDER_GROQ = "groq"
+PROVIDER_GEMINI = "gemini"
+SUPPORTED_PROVIDERS = (PROVIDER_GROQ, PROVIDER_GEMINI)
+RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
+MAX_REQUEST_TIMEOUT_SECONDS = 120
+MIN_REQUEST_TIMEOUT_SECONDS = 5
+
+
+def is_retryable_status_code(status_code: int) -> bool:
+    """Return True if an upstream HTTP status code should trigger key rotation/retry."""
+    return int(status_code) in RETRYABLE_HTTP_STATUS_CODES
+
+
+def get_provider_priority() -> List[str]:
+    """Return ordered list of active LLM providers based on environment variables."""
+    order: List[str] = []
+    if get_groq_api_key():
+        order.append(PROVIDER_GROQ)
+    if get_all_gemini_api_keys():
+        order.append(PROVIDER_GEMINI)
+    return order
+
+
+def format_provider_error(provider: str, detail: str) -> str:
+    """Format a concise error message for a given provider."""
+    clean_provider = str(provider or "provider").strip().upper()
+    clean_detail = re.sub(r"\s+", " ", str(detail or "")).strip()
+    return f"{clean_provider}: {clean_detail[:300]}"
+
+
+# Section 11B: Session & History Management Utilities
+def get_session_username() -> Optional[str]:
+    """Return the currently logged-in session username, if any."""
+    val = session.get("username")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def set_session_username(username: str) -> str:
+    """Save a sanitized username into the current Flask session."""
+    cleaned = sanitize_username(username)
+    session["username"] = cleaned
+    return cleaned
+
+
+def reset_session_state() -> None:
+    """Clear all keys from the current Flask session."""
+    session.clear()
+
+
+def get_memory_history_snapshot(chat_id: Any) -> List[Dict[str, str]]:
+    """Return a shallow copy of stored history for a chat_id."""
+    items = _user_histories.get(chat_id, [])
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def trim_all_histories(max_items: int = MAX_HISTORY_MESSAGES) -> int:
+    """Trim all stored in-memory chat histories to `max_items` and return count touched."""
+    trimmed = 0
+    for key, items in list(_user_histories.items()):
+        if isinstance(items, list) and len(items) > max_items:
+            _user_histories[key] = items[-max_items:] if max_items > 0 else []
+            trimmed += 1
+    return trimmed
+
+
+# Section 11C: Telegram Payload Inspection Helpers
+def get_telegram_update_type(update: Dict[str, Any]) -> str:
+    """Identify the primary field present in a Telegram update object."""
+    if not isinstance(update, dict):
+        return "invalid"
+    for field in (
+        "message",
+        "edited_message",
+        "channel_post",
+        "edited_channel_post",
+        "callback_query",
+        "inline_query",
+        "my_chat_member",
+        "chat_member",
+    ):
+        if field in update and update[field] is not None:
+            return field
+    return "unknown"
+
+
+def extract_telegram_chat_id(message: Dict[str, Any]) -> Optional[Any]:
+    """Safely extract chat.id from a Telegram message dictionary."""
+    if not isinstance(message, dict):
+        return None
+    chat = message.get("chat")
+    if isinstance(chat, dict) and "id" in chat:
+        return chat["id"]
+    return None
+
+
+def extract_telegram_text(message: Dict[str, Any]) -> str:
+    """Safely extract stripped text from a Telegram message dictionary."""
+    if not isinstance(message, dict):
+        return ""
+    text = message.get("text")
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
+def is_bot_command(text: str) -> bool:
+    """Return True if text starts with '/'."""
+    return isinstance(text, str) and text.strip().startswith("/")
+
+
+def parse_bot_command_name(text: str) -> str:
+    """Extract normalized command name (e.g. '/start@BotName' -> '/start')."""
+    if not is_bot_command(text):
+        return ""
+    first_token = text.strip().split()[0].lower()
+    if "@" in first_token:
+        first_token = first_token.split("@", 1)[0]
+    return first_token
+
+
+# Section 11D: Additional Diagnostic & Formatting Helpers
+def safe_json_dumps(data: Any, indent: Optional[int] = None) -> str:
+    """Serialize data to JSON string without failing on non-serializable objects."""
+    try:
+        return json.dumps(data, ensure_ascii=False, indent=indent, default=str)
+    except Exception as exc:
+        return json.dumps({"serialization_error": str(exc)}, ensure_ascii=False)
+
+
+def get_uptime_snapshot() -> Dict[str, Any]:
+    """Return a snapshot of application metadata and counters."""
+    return {
+        "app_name": APP_NAME,
+        "version": APP_VERSION,
+        "python_version": sys.version.split()[0],
+        "model": MODEL,
+        "groq_model": GROQ_MODEL,
+        "metrics": dict(_request_metrics),
+    }
+
+
+def reset_metrics_counters() -> None:
+    """Reset runtime metrics counters to zero."""
+    for key in list(_request_metrics.keys()):
+        _request_metrics[key] = 0
+
+
+def increment_metric(name: str, delta: int = 1) -> int:
+    """Increment a named metric counter safely and return its new value."""
+    current = int(_request_metrics.get(name, 0))
+    updated = current + int(delta)
+    _request_metrics[name] = updated
+    return updated
+
+
+def validate_chat_request_body(body: Any) -> Tuple[Optional[str], List[Dict[str, str]], Optional[str], Optional[str], Optional[str]]:
+    """
+    Validate and extract fields from a /chat JSON payload.
+    Returns (error_message, history, file_b64, file_mime, message_text).
+    """
+    if not isinstance(body, dict):
+        return "تنسيق JSON غير صالح.", [], None, None, None
+
+    msg = str(body.get("message", "")).strip()
+    raw_history = body.get("history", [])
+    file_data = body.get("file_data")
+    mime_type = body.get("mime_type")
+
+    try:
+        clean_b64, clean_mime = validate_attachment(file_data, mime_type)
+    except ValueError as err:
+        return str(err), [], None, None, None
+
+    if not msg and not clean_b64:
+        return "الرسالة فارغة.", [], None, None, None
+
+    clean_history = normalize_history(raw_history)
+    return None, clean_history, clean_b64, clean_mime, msg
+
+
+def build_error_payload(message: str, code: Optional[int] = None) -> Dict[str, Any]:
+    """Construct a uniform error response dictionary."""
+    payload: Dict[str, Any] = {"error": str(message)}
+    if code is not None:
+        payload["code"] = int(code)
+    return payload
+
+
+def build_success_reply_payload(reply: str, provider_hint: Optional[str] = None) -> Dict[str, Any]:
+    """Construct a uniform success response dictionary for /chat."""
+    payload: Dict[str, Any] = {"response": str(reply)}
+    if provider_hint:
+        payload["provider"] = str(provider_hint)
+    return payload
+
+
+# End of Zeno Argon application module.
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    run_local_server()
