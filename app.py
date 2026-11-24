@@ -1,138 +1,36 @@
 # -*- coding: utf-8 -*-
-"""Zeno AI | Argon Edition
-
-تدفق /chat:
-  1) Groq (إن وُجد GROQ_API_KEY ولا يوجد ملف مرفق) مع قائمة موديلات احتياطية.
-  2) Gemini مع تدوير المفاتيح (GEMINI_API_KEY, GEMINI_API_KEY_1..10) وقائمة موديلات احتياطية.
-  3) إذا فشل الاثنان: رسالة خطأ مفصّلة (بدون كشف أي مفتاح).
-"""
-import base64
-import binascii
-import hmac
-import logging
 import os
-import re
-import threading
-import time
-from collections import OrderedDict, deque
+import json
+import asyncio
+import urllib.request
+import urllib.error
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-import requests
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "zeno_argon_super_fast_2026")
 
-try:  # اختياري: قراءة ملف .env محلياً
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("zeno")
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# index.html بجانب app.py هو واجهة المستخدم الفعلية (قالب Jinja)
-app = Flask(__name__, template_folder=BASE_DIR)
-app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024  # حد Vercel ~4.5MB
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-
-_secret = os.getenv("SECRET_KEY")
-if not _secret:
-    log.warning("SECRET_KEY غير مضبوط؛ يتم استخدام مفتاح افتراضي. اضبطه في متغيرات البيئة.")
-    _secret = "zeno_argon_super_fast_2026"
-app.secret_key = _secret
-
-
-def _unique(items):
-    out = []
-    for i in items:
-        i = (i or "").strip()
-        if i and i not in out:
-            out.append(i)
-    return out
-
-
-# ملاحظة: llama-3.3-70b-versatile أوقفته Groq (16/08/2026). غيّر الموديل عبر GROQ_MODEL عند الحاجة.
-GROQ_MODELS = _unique([os.getenv("GROQ_MODEL"), "openai/gpt-oss-120b", "qwen/qwen3.6-27b"])
-GEMINI_MODELS = _unique([os.getenv("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-2.5-flash"])
-
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_HISTORY = 12
-# ميزانية زمنية إجمالية لكل طلب /chat (ثوانٍ) كي لا تتراكم المحاولات الفاشلة
-TIME_BUDGET = float(os.getenv("TIME_BUDGET", "40"))
-# مستوى التفكير في Gemini 3.x: minimal/low/medium/high (الافتراضي في Google هو high وهو بطيء جداً)
-GEMINI_THINKING = (os.getenv("GEMINI_THINKING") or "low").strip().lower()
-MAX_TEXT_FILE_CHARS = 200_000
-
-_key_lock = threading.Lock()
-_key_index = 0
+current_key_index = 0
+user_histories = {}
+_telegram_app = None
 
 
-# ---------------------------------------------------------------- أخطاء
-class ProviderError(Exception):
-    """kind: model | key | transient | other"""
-
-    def __init__(self, message, kind="other", status=None):
-        super().__init__(message)
-        self.kind = kind
-        self.status = status
-
-
-class ProviderFailed(Exception):
-    def __init__(self, provider, errors):
-        super().__init__(provider)
-        self.provider = provider
-        self.errors = errors
+def get_all_api_keys():
+    keys = []
+    main_key = os.getenv("GEMINI_API_KEY")
+    if main_key:
+        keys.append(main_key.strip())
+    for i in range(1, 11):
+        k = os.getenv(f"GEMINI_API_KEY_{i}")
+        if k and k.strip() not in keys:
+            keys.append(k.strip())
+    return keys
 
 
-def _short(text, n=300):
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
-    return text if len(text) <= n else text[:n] + "…"
-
-
-def _error_message(resp):
-    try:
-        err = resp.json().get("error", {})
-        if isinstance(err, dict):
-            return err.get("message") or str(err)
-        return str(err)
-    except Exception:
-        return resp.text
-
-
-# ---------------------------------------------------------------- أدوات
-_GEMINI_KEY_RE = re.compile(r"^gemini_api_key_?(\d*)$", re.I)
-_GROQ_KEY_RE = re.compile(r"^groq_api_key$", re.I)
-
-
-def _env_matches(regex):
-    """يرجع [(الاسم, القيمة)] لكل متغير بيئة يطابق النمط، بغض النظر عن حالة الأحرف."""
-    out = []
-    for name, val in os.environ.items():
-        m = regex.match(name)
-        if m and (val or "").strip():
-            idx = int(m.group(1)) if m.groups() and m.group(1) else 0
-            out.append((idx, name, val.strip()))
-    out.sort()
-    return [(n, v) for _, n, v in out]
-
-
-def get_gemini_keys():
-    """يقبل GEMINI_API_KEY و GEMINI_API_KEY_1.. وأيضاً Gemini_api_key1 (أي حالة أحرف)."""
-    return _unique([v for _, v in _env_matches(_GEMINI_KEY_RE)])
-
-
-def get_groq_key():
-    found = _env_matches(_GROQ_KEY_RE)
-    return found[0][1] if found else ""
-
-
-def clean_username(name):
-    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(name or ""))
-    return re.sub(r"\s+", " ", name).strip()[:40]
-
-
-def get_system_prompt(username):
+def get_system_prompt(username: str) -> str:
     return f"""أنت Argon (النسخة الخارقة من Zeno AI)، أسرع وأذكى مساعد برمجي وتقني، طورك المهندس "أبو سعيد".
 أنت تتحدث مع: "{username}".
 تعليمات صارمة:
@@ -141,225 +39,287 @@ def get_system_prompt(username):
 3. نسق إجابتك بـ Markdown احترافي."""
 
 
-def clean_history(raw):
-    """يضمن شكل [{role: user|assistant, content: str}] يبدأ بـ user ويتناوب الأدوار."""
-    if not isinstance(raw, list):
-        return []
-    out = []
-    for h in raw[-MAX_HISTORY:]:
-        if not isinstance(h, dict):
-            continue
-        role = "assistant" if h.get("role") == "assistant" else "user"
-        text = str(h.get("content", "")).strip()
-        if not text:
-            continue
-        if out and out[-1]["role"] == role:
-            out[-1]["content"] += "\n\n" + text
-        else:
-            out.append({"role": role, "content": text[:20000]})
-    while out and out[0]["role"] == "assistant":
-        out.pop(0)
-    return out
-
-
-def build_user_parts(msg, file_data, mime_type, file_name):
-    """صور وPDF تُرسل كما هي؛ الملفات النصية تُفك وتُرسل كنص (أضمن مع Gemini)."""
-    parts = []
-    if file_data:
-        mime = (mime_type or "").strip().lower() or "text/plain"
-        if mime.startswith("image/") or mime == "application/pdf":
-            parts.append({"inline_data": {"mime_type": mime, "data": file_data}})
-        else:
-            try:
-                text = base64.b64decode(file_data, validate=True).decode("utf-8")
-            except (binascii.Error, UnicodeDecodeError, ValueError):
-                raise ValueError("تعذّر قراءة الملف المرفق كنص. المدعوم: صور، PDF، وملفات نصية UTF-8.")
-            name = clean_username(file_name) or "attachment"
-            parts.append({"text": f"--- بداية الملف المرفق: {name} ---\n{text[:MAX_TEXT_FILE_CHARS]}\n--- نهاية الملف ---"})
-    if msg:
-        parts.append({"text": msg})
-    return parts
-
-
-# ---------------------------------------------------------------- Groq
-def _classify_groq(status, message):
-    low = (message or "").lower()
-    if status == 404 or "model_not_found" in low or "decommissioned" in low or "does not exist" in low:
-        return "model"
-    if status in (401, 403):
-        return "key"
-    if status == 429 or status >= 500:
-        return "transient"
-    return "other"
-
-
-def _groq_request(api_key, model, messages, timeout):
-    try:
-        r = requests.post(
-            GROQ_URL,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": model, "messages": messages, "temperature": 0.5, "max_completion_tokens": 2048},
-            timeout=(5, timeout),
-        )
-    except requests.RequestException as e:
-        raise ProviderError(f"{type(e).__name__}: {_short(e, 150)}", "transient")
-
-    if r.status_code != 200:
-        msg = _error_message(r)
-        raise ProviderError(f"HTTP {r.status_code} - {_short(msg)}", _classify_groq(r.status_code, msg), r.status_code)
-
-    try:
-        text = r.json()["choices"][0]["message"].get("content") or ""
-    except Exception:
-        raise ProviderError(f"رد غير متوقع: {_short(r.text)}", "other")
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    if not text:
-        raise ProviderError("رد فارغ من الموديل", "transient")
-    return text
-
-
-def call_groq(api_key, username, msg, history, deadline):
+def call_groq_fast(groq_key: str, username: str, msg: str, history: list) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
     messages = [{"role": "system", "content": get_system_prompt(username)}]
-    messages += history
+    for h in history[-MAX_HISTORY:]:
+        role = "assistant" if h.get("role") == "assistant" else "user"
+        messages.append({"role": role, "content": str(h.get("content", ""))})
     messages.append({"role": "user", "content": msg})
-    errors = []
-    for model in GROQ_MODELS:
-        remaining = deadline - time.monotonic()
-        if remaining < 3:
-            errors.append("Groq: انتهت الميزانية الزمنية للطلب")
-            break
-        try:
-            text = _groq_request(api_key, model, messages, min(15, remaining))
-            return text, model
-        except ProviderError as e:
-            errors.append(f"Groq · {model}: {e}")
-            log.warning("Groq فشل (%s): %s", model, e)
-            if e.kind in ("model", "transient"):
-                continue  # جرّب الموديل التالي
-            break  # مفتاح خاطئ أو طلب غير صالح: لا فائدة من المتابعة
-    raise ProviderFailed("groq", errors)
+
+    payload = json.dumps({
+        "model": "llama-3.3-70b-versatile",
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 4096
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {groq_key}",
+        "User-Agent": "ZenoArgon/1.0"
+    }, method="POST")
+
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"]
 
 
-# ---------------------------------------------------------------- Gemini
-def _classify_gemini(status, message):
-    low = (message or "").lower()
-    if "api key" in low and ("invalid" in low or "expired" in low or "not valid" in low):
-        return "key"
-    if status == 404 or "is not found" in low or "not supported for generatecontent" in low:
-        return "model"
-    if status in (401, 403, 429):
-        return "key"  # مفتاح غير صالح/محظور/تجاوز الحصة -> دوّر المفتاح
-    if status >= 500:
-        return "transient"
-    return "other"
+def call_gemini_fast(api_key: str, username: str, msg: str, history: list, file_data=None, mime_type=None) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}"
 
-
-def _gen_config(model, with_thinking=True):
-    cfg = {"maxOutputTokens": 4096}
-    if model.startswith("gemini-3"):
-        # Gemini 3 يفكّر بمستوى high افتراضياً (بطيء) والموصى به تركه temperature افتراضياً
-        if with_thinking and GEMINI_THINKING:
-            cfg["thinkingConfig"] = {"thinkingLevel": GEMINI_THINKING}
-    else:
-        cfg["temperature"] = 0.5
-        if with_thinking and model.startswith("gemini-2.5-flash"):
-            cfg["thinkingConfig"] = {"thinkingBudget": 0}
-    return cfg
-
-
-def _gemini_post(api_key, model, system_prompt, contents, timeout, with_thinking):
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "generationConfig": _gen_config(model, with_thinking),
-    }
-    try:
-        return requests.post(
-            f"{GEMINI_BASE}/{model}:generateContent",
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},  # المفتاح في الهيدر لا في الرابط
-            json=payload,
-            timeout=(5, timeout),
-        )
-    except requests.RequestException as e:
-        raise ProviderError(f"{type(e).__name__}: {_short(e, 150)}", "transient")
-
-
-def _gemini_request(api_key, model, system_prompt, contents, timeout):
-    r = _gemini_post(api_key, model, system_prompt, contents, timeout, True)
-    if r.status_code == 400 and "thinking" in (_error_message(r) or "").lower():
-        log.warning("إعداد التفكير غير مدعوم في %s؛ إعادة المحاولة بدونه.", model)
-        r = _gemini_post(api_key, model, system_prompt, contents, timeout, False)
-
-    if r.status_code != 200:
-        msg = _error_message(r)
-        raise ProviderError(f"HTTP {r.status_code} - {_short(msg)}", _classify_gemini(r.status_code, msg), r.status_code)
-
-    try:
-        data = r.json()
-    except ValueError:
-        raise ProviderError(f"رد غير JSON: {_short(r.text)}", "transient")
-
-    candidates = data.get("candidates") or []
-    if candidates:
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts if p.get("text") and not p.get("thought")).strip()
+    contents = []
+    for h in history[-MAX_HISTORY:]:
+        role = "model" if h.get("role") == "assistant" else "user"
+        text = str(h.get("content", "")).strip()
         if text:
-            return text
-        reason = candidates[0].get("finishReason", "UNKNOWN")
-        raise ProviderError(f"رد فارغ (finishReason={reason})", "other")
-    block = (data.get("promptFeedback") or {}).get("blockReason")
-    raise ProviderError("لم يتم تكوين رد" + (f" (blockReason={block})" if block else ""), "other")
+            contents.append({"role": role, "parts": [{"text": text}]})
+
+    user_parts = []
+    if file_data and mime_type:
+        user_parts.append({"inline_data": {"mime_type": mime_type, "data": file_data}})
+    if msg:
+        user_parts.append({"text": msg})
+
+    contents.append({"role": "user", "parts": user_parts})
+
+    payload = json.dumps({
+        "system_instruction": {"parts": [{"text": get_system_prompt(username)}]},
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.5,
+            "maxOutputTokens": 4096
+        }
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json"
+    }, method="POST")
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        candidates = data.get("candidates", [])
+        if candidates and "content" in candidates[0]:
+            parts = candidates[0]["content"].get("parts", [])
+            return "".join(p.get("text", "") for p in parts if "text" in p)
+        return "لم يتم تكوين رد."
 
 
-def call_gemini(keys, username, parts, history, deadline):
-    global _key_index
-    contents = [
-        {"role": "model" if h["role"] == "assistant" else "user", "parts": [{"text": h["content"]}]}
-        for h in history
-    ]
-    contents.append({"role": "user", "parts": parts})
-    system_prompt = get_system_prompt(username)
+def generate_reply(username: str, msg: str, history: list, file_data=None, mime_type=None) -> str:
+    global current_key_index
     errors = []
 
-    for model in GEMINI_MODELS:
-        with _key_lock:
-            start = _key_index % len(keys)
-        order = [(start + i) % len(keys) for i in range(len(keys))]
-        for idx in order:
-            remaining = deadline - time.monotonic()
-            if remaining < 3:
-                errors.append("Gemini: انتهت الميزانية الزمنية للطلب")
-                raise ProviderFailed("gemini", errors)
-            try:
-                text = _gemini_request(keys[idx], model, system_prompt, contents, min(30, remaining))
-                with _key_lock:
-                    _key_index = idx
-                return text, model
-            except ProviderError as e:
-                errors.append(f"Gemini · {model} · مفتاح #{idx + 1}: {e}")
-                log.warning("Gemini فشل (%s, مفتاح #%d): %s", model, idx + 1, e)
-                if e.kind == "model":
-                    break  # الموديل نفسه غير متاح: انتقل للموديل التالي
-                if e.kind in ("key", "transient"):
-                    with _key_lock:
-                        _key_index = (idx + 1) % len(keys)
-                    continue  # دوّر المفتاح
-                raise ProviderFailed("gemini", errors)  # خطأ في الطلب نفسه
-    raise ProviderFailed("gemini", errors)
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key and not file_data:
+        try:
+            return call_groq_fast(groq_key.strip(), username, msg, history).strip()
+        except Exception as e:
+            errors.append(f"Groq: {e}")
+
+    keys = get_all_api_keys()
+    if not keys:
+        msg_err = "لا توجد مفاتيح GEMINI_API_KEY."
+        if errors:
+            msg_err += " | " + " ; ".join(errors)
+        raise RuntimeError(msg_err)
+
+    for _ in range(len(keys)):
+        api_key = keys[current_key_index % len(keys)]
+        try:
+            return call_gemini_fast(api_key, username, msg, history, file_data, mime_type).strip()
+        except urllib.error.HTTPError as http_err:
+            err_body = http_err.read().decode("utf-8", errors="ignore")
+            errors.append(f"Gemini HTTP {http_err.code}: {err_body}")
+            if http_err.code in [429, 503]:
+                current_key_index = (current_key_index + 1) % len(keys)
+                continue
+            break
+        except Exception as e:
+            errors.append(f"Gemini: {e}")
+            break
+
+    raise RuntimeError(" ; ".join(errors) or "فشل الاتصال بالنموذج.")
 
 
-# ---------------------------------------------------------------- Routes
+def load_ui_template() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    html_path = os.path.join(base_dir, "index.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return UI_TEMPLATE_FALLBACK
+
+
+UI_TEMPLATE_FALLBACK = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Zeno AI | Argon Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { colors: { chatbg: '#090b10', sidebarbg: '#050609', msgbg: '#131622', userbg: '#2563eb' } } }
+        }
+    </script>
+    <style>
+        html, body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: #090b10; color: #ececec; margin: 0; padding: 0; height: 100%; height: 100dvh; overflow: hidden; }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #262c42; border-radius: 4px; }
+        .prose pre { background-color: #040508 !important; border-radius: 0.75rem; padding: 1rem; border: 1px solid #1f2438; overflow-x: auto; position: relative; margin: 0.75rem 0; direction: ltr; text-align: left; }
+        .prose code { font-family: 'Consolas', monospace; font-size: 0.85em; }
+        .typing-dot { animation: typing 1s infinite ease-in-out both; }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        .glass-input { background: rgba(19, 22, 34, 0.96); border: 1px solid #262c42; box-shadow: 0 5px 25px rgba(0,0,0,0.6); }
+        .copy-btn { position: absolute; top: 8px; right: 8px; background: #161929; color: #9ca3af; border: 1px solid #2b324d; padding: 3px 9px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+        .copy-btn:hover { background: #2563eb; color: #fff; }
+    </style>
+</head>
+<body class="flex h-full w-full overflow-hidden">
+    {% if not username %}
+    <div class="flex-1 flex items-center justify-center p-4 w-full h-full bg-[#090b10]">
+        <div class="bg-[#0d0f17] border border-[#262c42] p-8 rounded-3xl max-w-md w-full shadow-2xl text-center space-y-6">
+            <div class="w-20 h-20 mx-auto bg-blue-600/10 text-blue-500 rounded-full flex items-center justify-center text-4xl border border-blue-500/20">
+                <i class="fa-solid fa-bolt"></i>
+            </div>
+            <div>
+                <h1 class="text-3xl font-extrabold text-white mb-1">Zeno <span class="text-blue-500">Argon</span></h1>
+                <p class="text-xs text-gray-400 font-semibold uppercase mb-3">Direct Engine by Abu Saeed</p>
+                <p class="text-sm text-gray-300">أدخل اسمك للدخول للنظام السريع.</p>
+            </div>
+            <form method="POST" action="/login" class="space-y-4">
+                <input type="text" name="username" placeholder="اكتب اسمك هنا..." required autocomplete="off" class="w-full bg-[#131622] border border-[#262c42] rounded-xl px-4 py-3.5 text-base focus:outline-none focus:border-blue-500 text-center text-white">
+                <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 text-white py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-600/30">
+                    دخول للنظام <i class="fa-solid fa-arrow-left mr-2"></i>
+                </button>
+            </form>
+        </div>
+    </div>
+    {% else %}
+    <aside id="sidebar" class="fixed inset-y-0 right-0 z-50 w-72 bg-sidebarbg flex flex-col border-l border-[#262c42] h-full shadow-2xl transition-transform duration-300 transform translate-x-full md:translate-x-0 md:static">
+        <div class="p-5 border-b border-[#262c42] flex items-center justify-between">
+            <h1 class="font-black text-xl text-blue-400 flex items-center gap-2">
+                <i class="fa-solid fa-bolt text-blue-500"></i> Zeno Argon
+            </h1>
+            <button onclick="toggleSidebar()" class="md:hidden text-gray-400 hover:text-white p-2">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3">
+            <button onclick="clearMemory(); toggleSidebar();" class="w-full flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-xl transition text-sm">
+                <i class="fa-solid fa-plus w-5"></i> محادثة جديدة
+            </button>
+            <hr class="border-[#262c42] my-3">
+            <button onclick="exportChat()" class="w-full flex items-center gap-3 bg-transparent hover:bg-[#131622] text-gray-300 px-4 py-2.5 rounded-xl transition border border-[#262c42] text-sm">
+                <i class="fa-solid fa-download w-5 text-emerald-400"></i> تصدير المحادثة
+            </button>
+        </div>
+        <div class="p-4 border-t border-[#262c42] bg-[#07080d]">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm">
+                    {{ username[:2].upper() }}
+                </div>
+                <div class="flex-1 overflow-hidden">
+                    <p class="text-xs sm:text-sm font-bold text-gray-200 truncate">{{ username }}</p>
+                    <p class="text-[10px] text-emerald-400 truncate">Direct HTTP Engine</p>
+                </div>
+                <a href="/logout" class="text-red-400 hover:text-red-300 bg-red-400/10 p-2 rounded-lg" title="خروج">
+                    <i class="fa-solid fa-power-off"></i>
+                </a>
+            </div>
+        </div>
+    </aside>
+    <div id="sidebarOverlay" onclick="toggleSidebar()" class="fixed inset-0 bg-black/60 z-40 hidden md:hidden"></div>
+    <main class="flex-1 flex flex-col h-full min-h-0 relative bg-chatbg w-full overflow-hidden">
+        <header class="bg-sidebarbg border-b border-[#262c42] px-4 py-3 flex justify-between items-center text-gray-200 z-10 flex-shrink-0">
+            <div class="flex items-center gap-3">
+                <button onclick="toggleSidebar()" class="text-gray-300 hover:text-white p-1 md:hidden">
+                    <i class="fa-solid fa-bars text-lg"></i>
+                </button>
+                <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">{{ username[:2].upper() }}</div>
+                <h1 class="font-bold text-sm sm:text-base text-blue-400">Zeno <span class="text-xs text-emerald-400 font-mono">Argon</span></h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <button onclick="clearMemory()" class="text-gray-400 hover:text-white p-2 text-sm" title="محادثة جديدة"><i class="fa-solid fa-pen-to-square"></i></button>
+                <a href="/logout" class="text-red-400 p-2 text-sm" title="خروج"><i class="fa-solid fa-power-off"></i></a>
+            </div>
+        </header>
+        <div id="chatBox" class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 space-y-4 pb-8 w-full">
+            <div class="text-center my-10 px-4">
+                <div class="w-20 h-20 mx-auto bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white text-3xl font-bold border-4 border-[#262c42] shadow-2xl mb-4">
+                    <i class="fa-solid fa-bolt"></i>
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-bold text-gray-100">أهلاً بك، {{ username.split(' ')[0] }}</h2>
+                <p class="text-gray-400 mt-2 text-xs sm:text-sm">Zeno Argon جاهز للرد المباشر بأقصى سرعة.</p>
+            </div>
+            <div id="bottomAnchor"></div>
+        </div>
+        <button id="scrollDownBtn" onclick="forceScroll()" class="hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-30 bg-blue-600 hover:bg-blue-500 text-white w-9 h-9 rounded-full shadow-lg flex items-center justify-center border border-blue-400/40">
+            <i class="fa-solid fa-arrow-down text-sm"></i>
+        </button>
+        <div class="p-3 sm:p-4 bg-chatbg border-t border-[#161a29] z-20 flex-shrink-0">
+            <div id="fileIndicator" class="hidden max-w-4xl mx-auto mb-2 bg-[#131622] text-gray-300 text-xs px-3.5 py-2 rounded-lg flex items-center justify-between border border-[#262c42]">
+                <span id="fileName" class="truncate font-mono"></span>
+                <button onclick="removeFile()" class="text-red-400 hover:text-red-300 bg-red-400/10 px-2 py-1 rounded"><i class="fa-solid fa-trash"></i></button>
+            </div>
+            <div class="max-w-4xl mx-auto relative glass-input rounded-2xl flex items-end p-1.5 sm:p-2">
+                <input type="file" id="fileInput" class="hidden" accept="image/*,.pdf,.txt,.csv,.js,.py,.html,.json,.md">
+                <button onclick="document.getElementById('fileInput').click()" class="text-gray-400 hover:text-blue-400 px-2.5 pb-2.5 transition flex-shrink-0" title="إرفاق ملف">
+                    <i class="fa-solid fa-paperclip text-lg"></i>
+                </button>
+                <textarea id="userInput" rows="1" placeholder="اكتب رسالتك هنا..." class="flex-1 bg-transparent border-none px-2 py-2.5 text-sm sm:text-base focus:outline-none resize-none max-h-36 text-gray-100 placeholder-gray-500"></textarea>
+                <button onclick="sendMessage()" id="sendBtn" class="bg-blue-600 text-white hover:bg-blue-500 w-9 h-9 sm:w-11 sm:h-11 rounded-xl flex items-center justify-center transition flex-shrink-0 mb-0.5 mr-1.5 disabled:opacity-50">
+                    <i class="fa-solid fa-paper-plane text-sm"></i>
+                </button>
+            </div>
+        </div>
+    </main>
+    <script>
+        marked.setOptions({ breaks: true });
+        const chatBox = document.getElementById('chatBox'), scrollDownBtn = document.getElementById('scrollDownBtn'), userInput = document.getElementById('userInput'), sendBtn = document.getElementById('sendBtn'), fileInput = document.getElementById('fileInput'), fileIndicator = document.getElementById('fileIndicator'), fileNameDisplay = document.getElementById('fileName'), sidebar = document.getElementById('sidebar'), sidebarOverlay = document.getElementById('sidebarOverlay');
+        const currentUser = "{{ username }}", userInitials = "{{ username[:2].upper() }}";
+        let history = [], hasStarted = false, currentFileBase64 = null, currentFileMime = null, currentFileName = null;
+        chatBox.addEventListener('scroll', () => { const dist = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight; scrollDownBtn.classList.toggle('hidden', dist <= 120); });
+        function forceScroll() { chatBox.scrollTop = chatBox.scrollHeight; setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 60); }
+        function toggleSidebar() { sidebar.classList.toggle('translate-x-full'); sidebarOverlay.classList.toggle('hidden'); }
+        fileInput.addEventListener('change', function(e) { const file = e.target.files[0]; if(!file) return; currentFileMime = file.type || 'text/plain'; currentFileName = file.name; const reader = new FileReader(); reader.onload = function(event) { currentFileBase64 = event.target.result.split(',')[1]; fileNameDisplay.innerHTML = `<i class="fa-solid fa-file-code mr-2 text-blue-400"></i> ${currentFileName}`; fileIndicator.classList.remove('hidden'); }; reader.readAsDataURL(file); });
+        function removeFile() { currentFileBase64 = currentFileMime = currentFileName = null; fileInput.value = ''; fileIndicator.classList.add('hidden'); }
+        userInput.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; if(this.value.trim() === '') this.style.height = 'auto'; });
+        userInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+        function clearWelcomeMessage() { if (!hasStarted) { chatBox.innerHTML = ''; hasStarted = true; } }
+        function addCopyButtons(container) { container.querySelectorAll('pre').forEach((preBlock) => { if (preBlock.querySelector('.copy-btn')) return; const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.innerHTML = '<i class="fa-regular fa-copy"></i> نسخ'; btn.onclick = () => { const codeText = preBlock.querySelector('code')?.innerText || preBlock.innerText; navigator.clipboard.writeText(codeText); btn.innerHTML = '<i class="fa-solid fa-check text-emerald-400"></i> تم!'; setTimeout(() => { btn.innerHTML = '<i class="fa-regular fa-copy"></i> نسخ'; }, 2000); }; preBlock.appendChild(btn); }); }
+        function appendMessage(role, content, attachmentName = null) { clearWelcomeMessage(); const isUser = role === 'user'; const finalContent = isUser ? escapeHTML(content) : marked.parse(content); let attachmentHtml = ''; if (isUser && attachmentName) { attachmentHtml = `<div class="bg-[#262c42] text-blue-300 text-xs px-3 py-1.5 rounded-lg mb-2 inline-flex items-center font-mono"><i class="fa-solid fa-file-lines ml-2"></i> ${attachmentName}</div><br>`; } const msgDiv = document.createElement('div'); msgDiv.className = `w-full max-w-4xl mx-auto flex gap-3 sm:gap-4 ${isUser ? 'flex-row-reverse' : ''} mb-6`; const avatar = isUser ? `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-blue-600 flex-shrink-0 flex items-center justify-center text-white font-bold text-xs sm:text-sm mt-1">${userInitials}</div>` : `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#131622] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 border border-[#262c42]"><i class="fa-solid fa-bolt text-xs sm:text-sm"></i></div>`; const bubbleClass = isUser ? 'bg-blue-600/20 border border-blue-500/30 px-4 py-3 rounded-2xl rounded-tl-sm text-gray-100 max-w-[85%] text-sm sm:text-base' : 'text-gray-200 prose prose-invert max-w-full leading-relaxed w-full bg-[#131622] p-4 sm:p-6 rounded-2xl rounded-tr-sm border border-[#262c42] text-sm sm:text-base'; msgDiv.innerHTML = `${avatar}<div class="${bubbleClass} break-words overflow-hidden">${attachmentHtml}${finalContent}</div>`; chatBox.appendChild(msgDiv); if(!isUser) { msgDiv.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block)); addCopyButtons(msgDiv); } forceScroll(); }
+        function showTyping() { clearWelcomeMessage(); const msgDiv = document.createElement('div'); msgDiv.id = 'typingIndicator'; msgDiv.className = `w-full max-w-4xl mx-auto flex gap-3 sm:gap-4 mb-6`; msgDiv.innerHTML = `<div class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#131622] flex-shrink-0 flex items-center justify-center text-blue-400 mt-1 border border-[#262c42]"><i class="fa-solid fa-bolt text-xs sm:text-sm"></i></div><div class="flex items-center gap-1.5 h-10 px-4 bg-[#131622] rounded-2xl rounded-tr-sm border border-[#262c42]"><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div><div class="w-2 h-2 bg-blue-500 rounded-full typing-dot"></div></div>`; chatBox.appendChild(msgDiv); forceScroll(); }
+        function hideTyping() { const el = document.getElementById('typingIndicator'); if(el) el.remove(); }
+        async function sendMessage() { const text = userInput.value.trim(); if (!text && !currentFileBase64) return; if (sendBtn.disabled) return; const sentText = text || "حلل هذا المرفق بالتفصيل."; const sentFileName = currentFileName; userInput.value = ''; userInput.style.height = 'auto'; sendBtn.disabled = true; appendMessage('user', sentText, sentFileName); showTyping(); const payload = { message: sentText, history: history, file_data: currentFileBase64, mime_type: currentFileMime }; removeFile(); try { const res = await fetch('/chat', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }); hideTyping(); if (res.status === 401) { window.location.reload(); return; } const data = await res.json(); if(res.ok) { appendMessage('assistant', data.response); history.push({role: 'user', content: sentFileName ? `[مرفق: ${sentFileName}] ${sentText}` : sentText}); history.push({role: 'assistant', content: data.response}); if(history.length > 12) history = history.slice(-12); } else { appendMessage('assistant', `⚠️ **خطأ:** ${data.error}`); } } catch (err) { hideTyping(); appendMessage('assistant', "⚠️ **خطأ اتصال:** تأكد من الإنترنت."); } finally { sendBtn.disabled = false; userInput.focus(); } }
+        function clearMemory() { history = []; hasStarted = false; removeFile(); chatBox.innerHTML = `<div class="text-center my-12"><div class="w-20 h-20 mx-auto bg-blue-600 rounded-full flex items-center justify-center text-white text-3xl font-bold mb-4"><i class="fa-solid fa-bolt"></i></div><h2 class="text-2xl font-bold text-gray-100">تم مسح الذاكرة</h2><p class="text-gray-400 mt-2 text-xs sm:text-sm">جاهز لمحادثة جديدة يا ${currentUser}.</p></div>`; }
+        function exportChat() { if(history.length === 0) return alert('لا يوجد محادثة لتصديرها!'); let textData = "Zeno Argon - Chat Export\\n=========================\\n\\n"; history.forEach(msg => { textData += `[${msg.role === 'user' ? currentUser : "Argon"}]:\\n${msg.content}\\n\\n-------------------\\n\\n`; }); const blob = new Blob([textData], { type: 'text/plain;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `Argon_${new Date().getTime()}.txt`; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
+        function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag])); }
+    </script>
+    {% endif %}
+</body>
+</html>
+"""
+
+
 @app.route("/")
 def home():
-    return render_template("index.html", username=session.get("username"))
+    return render_template_string(load_ui_template(), username=session.get("username"), model=MODEL)
 
 
-@app.route("/login", methods=["GET", "POST"])
+@app.route("/login", methods=["POST"])
 def login():
-    if request.method == "POST":
-        username = clean_username(request.form.get("username", ""))
-        if username:
-            session["username"] = username
+    username = request.form.get("username", "").strip()
+    if username:
+        session["username"] = username
     return redirect(url_for("home"))
 
 
@@ -369,193 +329,105 @@ def logout():
     return redirect(url_for("home"))
 
 
-@app.errorhandler(413)
-def too_large(_e):
-    return jsonify({"error": "حجم الطلب/الملف كبير جداً (الحد الأقصى ~4MB)."}), 413
-
-
-class NoProviders(Exception):
-    pass
-
-
-def generate_reply(username, msg, history, parts=None, has_file=False):
-    """التدفق المشترك (الويب + تيليجرام): Groq ثم Gemini. يرجع (النص, المزوّد, الموديل)."""
-    groq_key = get_groq_key()
-    gemini_keys = get_gemini_keys()
-    if not groq_key and not gemini_keys:
-        raise NoProviders()
-
-    parts = parts or [{"text": msg}]
-    failures = []
-    deadline = time.monotonic() + TIME_BUDGET
-
-    # 1) Groq (نصوص فقط)
-    if groq_key and not has_file:
-        try:
-            text, model = call_groq(groq_key, username, msg, history, deadline)
-            return text, "groq", model
-        except ProviderFailed as e:
-            failures += e.errors
-    elif groq_key and has_file:
-        log.info("تخطي Groq لأن هناك ملفاً مرفقاً؛ الانتقال إلى Gemini.")
-
-    # 2) Gemini
-    if gemini_keys:
-        try:
-            text, model = call_gemini(gemini_keys, username, parts, history, deadline)
-            return text, "gemini", model
-        except ProviderFailed as e:
-            failures += e.errors
-    else:
-        failures.append("Gemini: لا توجد مفاتيح GEMINI_API_KEY مضبوطة.")
-
-    raise ProviderFailed("all", failures)
-
-
 @app.post("/chat")
 def chat():
+    global current_key_index
     username = session.get("username")
     if not username:
         return jsonify({"error": "يرجى تسجيل الدخول أولاً."}), 401
 
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "صيغة الطلب غير صحيحة (JSON متوقع)."}), 400
+    try:
+        data = request.get_json(silent=True) or {}
+        msg = str(data.get("message", "")).strip()
+        client_history = data.get("history", [])
+        file_data = data.get("file_data")
+        mime_type = data.get("mime_type")
 
-    msg = str(data.get("message") or "").strip()
-    file_data = data.get("file_data") or None
-    mime_type = data.get("mime_type") or None
-    file_name = data.get("file_name") or None
-    history = clean_history(data.get("history"))
+        if not msg and not file_data:
+            return jsonify({"error": "الرسالة فارغة."}), 400
 
-    if not msg and not file_data:
-        return jsonify({"error": "الرسالة فارغة."}), 400
+        reply = generate_reply(username, msg, client_history, file_data=file_data, mime_type=mime_type)
+        return jsonify({"response": reply})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+async def _tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    user = update.effective_user
+    name = user.first_name if user and user.first_name else "مستخدم"
+    user_histories[update.effective_chat.id] = []
+    await update.message.reply_text(f"أهلاً {name} ⚡ أنا Zeno Argon على تليجرام. أرسل رسالتك أو استخدم /clear لمسح السجل.")
+
+
+async def _tg_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    user_histories[update.effective_chat.id] = []
+    await update.message.reply_text("تم مسح سجل المحادثة ⚡")
+
+
+async def _tg_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    username = (user.full_name if user and user.full_name else (user.username or "User"))
+    msg = update.message.text.strip()
+    history = user_histories.setdefault(chat_id, [])
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        parts = build_user_parts(msg, file_data, mime_type, file_name)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        reply = generate_reply(username, msg, history)
+        history.append({"role": "user", "content": msg})
+        history.append({"role": "assistant", "content": reply})
+        if len(history) > MAX_HISTORY:
+            user_histories[chat_id] = history[-MAX_HISTORY:]
 
-    try:
-        text, provider, model = generate_reply(username, msg, history, parts, bool(file_data))
-        return jsonify({"response": text, "provider": provider, "model": model})
-    except NoProviders:
-        return jsonify({"error": "لم يتم ضبط أي مفتاح: أضف GROQ_API_KEY و/أو GEMINI_API_KEY في متغيرات البيئة."}), 500
-    except ProviderFailed as e:
-        error = "تعذّر الحصول على رد من أي مزوّد:\n\n" + "\n".join(f"- {f}" for f in e.errors)
-        return jsonify({"error": error, "details": e.errors}), 502
+        for i in range(0, len(reply), 4000):
+            await update.message.reply_text(reply[i:i + 4000])
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ خطأ: {e}")
 
 
-# ---------------------------------------------------------------- Telegram
-TG_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-TG_SECRET = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()
-TG_MAX_CHATS = 500  # أقصى عدد محادثات تُحفظ في الذاكرة
+async def _process_telegram_update(raw_data: dict):
+    global _telegram_app
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN غير مضبوط.")
 
-_tg_lock = threading.Lock()
-_tg_history = OrderedDict()   # chat_id -> [{role, content}]  (ذاكرة مؤقتة: تضيع مع إعادة تشغيل السيرفر)
-_tg_seen = deque(maxlen=300)  # update_id التي عولجت (لمنع تكرار الرد عند إعادة إرسال تيليجرام)
+    if _telegram_app is None:
+        _telegram_app = Application.builder().token(token.strip()).build()
+        _telegram_app.add_handler(CommandHandler("start", _tg_start))
+        _telegram_app.add_handler(CommandHandler("clear", _tg_clear))
+        _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _tg_message))
 
-
-def tg_api(method, payload):
-    """استدعاء Telegram Bot API. لا نسجّل الرابط أبداً لأنه يحتوي التوكن."""
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/{method}", json=payload, timeout=(5, 10))
-        if r.status_code != 200:
-            log.warning("Telegram %s فشل: HTTP %s %s", method, r.status_code, _short(r.text, 150))
-        return r.status_code == 200
-    except requests.RequestException as e:
-        log.warning("Telegram %s فشل: %s", method, type(e).__name__)
-        return False
+    async with _telegram_app:
+        update = Update.de_json(raw_data, _telegram_app.bot)
+        await _telegram_app.process_update(update)
 
 
-def tg_send(chat_id, text):
-    text = (text or "").strip() or "…"
-    for i in range(0, len(text), 4000):  # حد تيليجرام 4096 حرفاً
-        tg_api("sendMessage", {"chat_id": chat_id, "text": text[i:i + 4000]})
-
-
-def _tg_get_history(chat_id):
-    with _tg_lock:
-        return list(_tg_history.get(chat_id, []))
-
-
-def _tg_save(chat_id, user_text, reply):
-    with _tg_lock:
-        h = _tg_history.pop(chat_id, [])
-        h += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
-        _tg_history[chat_id] = h[-MAX_HISTORY:]
-        while len(_tg_history) > TG_MAX_CHATS:
-            _tg_history.popitem(last=False)
-
-
-@app.post("/telegram")
+@app.post("/telegram-webhook")
 def telegram_webhook():
-    if not TG_TOKEN:
-        return jsonify({"error": "TELEGRAM_BOT_TOKEN غير مضبوط."}), 503
-    if TG_SECRET and not hmac.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), TG_SECRET):
-        return jsonify({"error": "forbidden"}), 403
-
-    update = request.get_json(silent=True) or {}
-    uid = update.get("update_id")
-    with _tg_lock:
-        if uid is not None and uid in _tg_seen:
-            return jsonify({"ok": True})  # مكرر
-        _tg_seen.append(uid)
-
-    message = update.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    if chat_id is None:
-        return jsonify({"ok": True})
-
-    text = str(message.get("text") or message.get("caption") or "").strip()
-    username = clean_username((message.get("from") or {}).get("first_name")) or "صديقي"
-
-    # نردّ دائماً بـ 200 حتى لا يعيد تيليجرام الإرسال بلا نهاية
-    if text.split("@")[0] == "/start":
-        tg_send(chat_id, f"أهلاً {username}! أنا Zeno. اكتب أي سؤال وأرد عليك فوراً ⚡\nاستخدم /new لبدء محادثة جديدة.")
-        return jsonify({"ok": True})
-    if text.split("@")[0] in ("/new", "/clear"):
-        with _tg_lock:
-            _tg_history.pop(chat_id, None)
-        tg_send(chat_id, "تم بدء محادثة جديدة ⚡")
-        return jsonify({"ok": True})
-    if not text:
-        tg_send(chat_id, "حالياً أدعم الرسائل النصية فقط.")
-        return jsonify({"ok": True})
-
-    tg_api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
     try:
-        reply, provider, model = generate_reply(username, text, _tg_get_history(chat_id))
-        _tg_save(chat_id, text, reply)
-        log.info("Telegram رد عبر %s (%s)", provider, model)
-        tg_send(chat_id, reply)
-    except NoProviders:
-        log.error("لا توجد مفاتيح GROQ/GEMINI.")
-        tg_send(chat_id, "⚠️ البوت غير مهيّأ بعد (مفاتيح الذكاء الاصطناعي غير مضبوطة).")
-    except ProviderFailed as e:
-        log.error("فشل كل المزوّدين: %s", " | ".join(e.errors))
-        tg_send(chat_id, "⚠️ حصل خطأ مؤقت، حاول مرة أخرى بعد قليل.")
-    return jsonify({"ok": True})
+        raw_data = request.get_json(silent=True) or {}
+        if not raw_data:
+            return jsonify({"ok": False, "error": "Empty payload"}), 400
 
+        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+        if secret:
+            header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header_secret != secret:
+                return jsonify({"ok": False, "error": "Unauthorized webhook"}), 403
 
-@app.route("/debug-env")
-def debug_env():
-    """تشخيص مؤقت: يعرض فقط هل المتغيرات موجودة (true/false) دون كشف القيم. احذفه بعد الانتهاء."""
-    if not session.get("username"):
-        return jsonify({"error": "سجّل الدخول أولاً ثم افتح /debug-env"}), 401
-    return jsonify({
-        "groq_key_found": bool(get_groq_key()),
-        "gemini_keys_found": len(get_gemini_keys()),
-        "gemini_variable_names": [n for n, _ in _env_matches(_GEMINI_KEY_RE)],  # أسماء فقط
-        "secret_key_set": bool((os.getenv("SECRET_KEY") or "").strip()),
-        "groq_models": GROQ_MODELS,
-        "gemini_models": GEMINI_MODELS,
-    })
+        asyncio.run(_process_telegram_update(raw_data))
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(
-        host=os.getenv("HOST", "127.0.0.1"),
-        port=int(os.getenv("PORT", "5000")),
-        debug=os.getenv("FLASK_DEBUG") == "1",
-    )
+    app.run(host="0.0.0.0", port=5000, debug=True)
