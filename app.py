@@ -94,9 +94,30 @@ def _error_message(resp):
 
 
 # ---------------------------------------------------------------- أدوات
+_GEMINI_KEY_RE = re.compile(r"^gemini_api_key_?(\d*)$", re.I)
+_GROQ_KEY_RE = re.compile(r"^groq_api_key$", re.I)
+
+
+def _env_matches(regex):
+    """يرجع [(الاسم, القيمة)] لكل متغير بيئة يطابق النمط، بغض النظر عن حالة الأحرف."""
+    out = []
+    for name, val in os.environ.items():
+        m = regex.match(name)
+        if m and (val or "").strip():
+            idx = int(m.group(1)) if m.groups() and m.group(1) else 0
+            out.append((idx, name, val.strip()))
+    out.sort()
+    return [(n, v) for _, n, v in out]
+
+
 def get_gemini_keys():
-    names = ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY_{i}" for i in range(1, 11)]
-    return _unique([os.getenv(n) for n in names])
+    """يقبل GEMINI_API_KEY و GEMINI_API_KEY_1.. وأيضاً Gemini_api_key1 (أي حالة أحرف)."""
+    return _unique([v for _, v in _env_matches(_GEMINI_KEY_RE)])
+
+
+def get_groq_key():
+    found = _env_matches(_GROQ_KEY_RE)
+    return found[0][1] if found else ""
 
 
 def clean_username(name):
@@ -342,7 +363,7 @@ def chat():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    groq_key = get_groq_key()
     gemini_keys = get_gemini_keys()
     if not groq_key and not gemini_keys:
         return jsonify({"error": "لم يتم ضبط أي مفتاح: أضف GROQ_API_KEY و/أو GEMINI_API_KEY في متغيرات البيئة."}), 500
@@ -378,9 +399,11 @@ def debug_env():
     """تشخيص مؤقت: يعرض فقط هل المتغيرات موجودة (true/false) دون كشف القيم. احذفه بعد الانتهاء."""
     if not session.get("username"):
         return jsonify({"error": "سجّل الدخول أولاً ثم افتح /debug-env"}), 401
-    names = ["GROQ_API_KEY", "GEMINI_API_KEY"] + [f"GEMINI_API_KEY_{i}" for i in range(1, 11)] + ["SECRET_KEY"]
     return jsonify({
-        "env": {n: bool((os.getenv(n) or "").strip()) for n in names},
+        "groq_key_found": bool(get_groq_key()),
+        "gemini_keys_found": len(get_gemini_keys()),
+        "gemini_variable_names": [n for n, _ in _env_matches(_GEMINI_KEY_RE)],  # أسماء فقط
+        "secret_key_set": bool((os.getenv("SECRET_KEY") or "").strip()),
         "groq_models": GROQ_MODELS,
         "gemini_models": GEMINI_MODELS,
     })
