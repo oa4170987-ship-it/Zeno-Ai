@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
@@ -55,6 +56,10 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 MAX_HISTORY = 12
+# ميزانية زمنية إجمالية لكل طلب /chat (ثوانٍ) كي لا تتراكم المحاولات الفاشلة
+TIME_BUDGET = float(os.getenv("TIME_BUDGET", "40"))
+# مستوى التفكير في Gemini 3.x: minimal/low/medium/high (الافتراضي في Google هو high وهو بطيء جداً)
+GEMINI_THINKING = (os.getenv("GEMINI_THINKING") or "low").strip().lower()
 MAX_TEXT_FILE_CHARS = 200_000
 
 _key_lock = threading.Lock()
@@ -186,13 +191,13 @@ def _classify_groq(status, message):
     return "other"
 
 
-def _groq_request(api_key, model, messages):
+def _groq_request(api_key, model, messages, timeout):
     try:
         r = requests.post(
             GROQ_URL,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": model, "messages": messages, "temperature": 0.5, "max_completion_tokens": 4096},
-            timeout=(5, 25),
+            json={"model": model, "messages": messages, "temperature": 0.5, "max_completion_tokens": 2048},
+            timeout=(5, timeout),
         )
     except requests.RequestException as e:
         raise ProviderError(f"{type(e).__name__}: {_short(e, 150)}", "transient")
@@ -211,14 +216,18 @@ def _groq_request(api_key, model, messages):
     return text
 
 
-def call_groq(api_key, username, msg, history):
+def call_groq(api_key, username, msg, history, deadline):
     messages = [{"role": "system", "content": get_system_prompt(username)}]
     messages += history
     messages.append({"role": "user", "content": msg})
     errors = []
     for model in GROQ_MODELS:
+        remaining = deadline - time.monotonic()
+        if remaining < 3:
+            errors.append("Groq: انتهت الميزانية الزمنية للطلب")
+            break
         try:
-            text = _groq_request(api_key, model, messages)
+            text = _groq_request(api_key, model, messages, min(15, remaining))
             return text, model
         except ProviderError as e:
             errors.append(f"Groq · {model}: {e}")
@@ -243,21 +252,41 @@ def _classify_gemini(status, message):
     return "other"
 
 
-def _gemini_request(api_key, model, system_prompt, contents):
+def _gen_config(model, with_thinking=True):
+    cfg = {"maxOutputTokens": 4096}
+    if model.startswith("gemini-3"):
+        # Gemini 3 يفكّر بمستوى high افتراضياً (بطيء) والموصى به تركه temperature افتراضياً
+        if with_thinking and GEMINI_THINKING:
+            cfg["thinkingConfig"] = {"thinkingLevel": GEMINI_THINKING}
+    else:
+        cfg["temperature"] = 0.5
+        if with_thinking and model.startswith("gemini-2.5-flash"):
+            cfg["thinkingConfig"] = {"thinkingBudget": 0}
+    return cfg
+
+
+def _gemini_post(api_key, model, system_prompt, contents, timeout, with_thinking):
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 8192},
+        "generationConfig": _gen_config(model, with_thinking),
     }
     try:
-        r = requests.post(
+        return requests.post(
             f"{GEMINI_BASE}/{model}:generateContent",
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},  # المفتاح في الهيدر لا في الرابط
             json=payload,
-            timeout=(5, 40),
+            timeout=(5, timeout),
         )
     except requests.RequestException as e:
         raise ProviderError(f"{type(e).__name__}: {_short(e, 150)}", "transient")
+
+
+def _gemini_request(api_key, model, system_prompt, contents, timeout):
+    r = _gemini_post(api_key, model, system_prompt, contents, timeout, True)
+    if r.status_code == 400 and "thinking" in (_error_message(r) or "").lower():
+        log.warning("إعداد التفكير غير مدعوم في %s؛ إعادة المحاولة بدونه.", model)
+        r = _gemini_post(api_key, model, system_prompt, contents, timeout, False)
 
     if r.status_code != 200:
         msg = _error_message(r)
@@ -280,7 +309,7 @@ def _gemini_request(api_key, model, system_prompt, contents):
     raise ProviderError("لم يتم تكوين رد" + (f" (blockReason={block})" if block else ""), "other")
 
 
-def call_gemini(keys, username, parts, history):
+def call_gemini(keys, username, parts, history, deadline):
     global _key_index
     contents = [
         {"role": "model" if h["role"] == "assistant" else "user", "parts": [{"text": h["content"]}]}
@@ -295,8 +324,12 @@ def call_gemini(keys, username, parts, history):
             start = _key_index % len(keys)
         order = [(start + i) % len(keys) for i in range(len(keys))]
         for idx in order:
+            remaining = deadline - time.monotonic()
+            if remaining < 3:
+                errors.append("Gemini: انتهت الميزانية الزمنية للطلب")
+                raise ProviderFailed("gemini", errors)
             try:
-                text = _gemini_request(keys[idx], model, system_prompt, contents)
+                text = _gemini_request(keys[idx], model, system_prompt, contents, min(30, remaining))
                 with _key_lock:
                     _key_index = idx
                 return text, model
@@ -369,11 +402,12 @@ def chat():
         return jsonify({"error": "لم يتم ضبط أي مفتاح: أضف GROQ_API_KEY و/أو GEMINI_API_KEY في متغيرات البيئة."}), 500
 
     failures = []
+    deadline = time.monotonic() + TIME_BUDGET
 
     # 1) Groq (نصوص فقط)
     if groq_key and not file_data:
         try:
-            text, model = call_groq(groq_key, username, msg, history)
+            text, model = call_groq(groq_key, username, msg, history, deadline)
             return jsonify({"response": text, "provider": "groq", "model": model})
         except ProviderFailed as e:
             failures += e.errors
@@ -383,7 +417,7 @@ def chat():
     # 2) Gemini
     if gemini_keys:
         try:
-            text, model = call_gemini(gemini_keys, username, parts, history)
+            text, model = call_gemini(gemini_keys, username, parts, history, deadline)
             return jsonify({"response": text, "provider": "gemini", "model": model})
         except ProviderFailed as e:
             failures += e.errors
